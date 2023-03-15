@@ -1,0 +1,2735 @@
+---
+title: "Comparison of eDNA, BRUV, and Seine Methods in Surf Zone Ecosystems"
+Code authors: "Zachary Gold & McKenzie Koch"
+date: "8/23/2022"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Load In Data aqnd Pre Processing 
+### Library Loading
+```{r}
+library(ggpmisc)
+library(phyloseq)
+library(metagMisc)
+library(wesanderson)
+library(tidyverse)
+library(vegan)
+library(iNEXT)
+library(multcomp)
+library(multcompView)
+library(treemapify)
+library(brew)
+library(RColorBrewer)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(VennDiagram)
+library(here)
+library(skimr)
+library(broom)
+library(knitr)
+
+```
+
+
+### Color Preparation
+```{r}
+#ColorLoading
+wes_palette("GrandBudapest1", n=4) -> col_gbp1
+wes_palette("GrandBudapest2", n=4) -> col_gbp2
+wes_palette("Darjeeling1", n=5) -> col_dar1
+wes_palette("Darjeeling2", n=5) -> col_dar2
+wes_palette("Moonrise3", n=5) ->col_moo3
+wes_palette("Zissou1", n=5) ->col_zis1
+
+#eDNA
+#col_dar2[4]
+#Seine and eDNA
+#col_dar1[2]
+#Seine
+#col_zis1[3]
+#Visual
+#col_dar1[4]
+#BRUV
+#col_gbp2[1]
+#BRUV and eDNA 
+#col_gbp2[4]
+#regression
+#col_dar2[4]
+#all
+"coral4" 
+
+#Colors by Region (aka Location)
+col_loc <- c(col_dar1[1],col_dar1[2],col_dar1[3],col_dar1[4],col_dar1[5],col_gbp2[1], col_gbp2[2], col_gbp2[4])
+#col_loc
+
+#Colors by Method Seine, eDNA, bruv
+col_meth <- c(col_zis1[3],col_moo3[1],col_gbp1[2])
+```
+### Load eDNA data
+```{r}
+#Load Data
+ASV.nested <-  readRDS(file=here("decontam","ASV.nested_final.RDS"))
+ASV.table_used <- readRDS(file=here("decontam","ASV.table_used.RDS"))
+ASV.table_long <- readRDS(file=here("decontam","ASV.table_long.RDS"))
+
+hash.key <- readRDS(file= here("decontam","Output_R","hash.key.RDS"))
+
+#edna Data
+all_samples <- readRDS(file= here("decontam","Output_R","post_occupancy_results_sum.taxonomy_tech_reps_summed_eDNA_index.RDS")) #this is eDNA index
+
+all_samples_reads <- readRDS(file= here("decontam","Output_R","post_occupancy_results_sum.taxonomy_tech_reps_summed_read_counts.RDS"))
+
+site_reads <- readRDS(file=here("decontam","Output_R","post_occ_site_sum.taxonomy_reads_summed.RDS"))
+
+site_eindex <- readRDS(file=here("decontam","Output_R","post_occ_site_averaged_sum.taxonomy_e_index.RDS"))
+
+#Metadata 
+input_meta_path_derep <- here("data","metadata_ucsb_2018_050520_dereplicated.csv")
+
+#Load Metadata data
+metadata <- read.table(input_meta_path_derep, header = 1, sep = ",", stringsAsFactors = F)
+
+metadata %>% 
+  dplyr::select(Site,Location, Sample_date, temp_2018,avg_temp_total) %>% dplyr::distinct() -> site_metadata
+
+site_metadata[-1,] -> site_metadata
+```
+
+### Ranacapa Phyloseq Code
+```{r anacapa to phyloseq functions from ranacapa library imported manually since they do not work on R3.6.0,  results="hide", warning=FALSE, include=FALSE}
+#' Takes a site-abundance table from Anacapa, and summarizes to each unique taxon in the sum.taxonomy column
+#' @param taxon_table OTU table from Anacapa
+#' @author Gaurav Kandlikar
+#' @examples
+#' good_taxon_table <- data.frame(sum.taxonomy = c("a;b;c;d;f;u", "p;q;r;s;t;u"),
+#' site_1 = c(0,1), site_2 = c(10, 20))
+#' group_anacapa_by_taxonomy(good_taxon_table)
+#' @export
+
+group_anacapa_by_taxonomy <- function(taxon_table) {
+  # If tables were made in New Anacapa (with Domain), get rid of domain...
+  if(stringr::str_count(taxon_table$sum.taxonomy, ";")[1] == 2) {
+    taxon_table$sum.taxonomy = gsub(pattern = "^.*?;", replacement = "", x = taxon_table$sum.taxonomy)
+  }
+  taxon_table$sum.taxonomy
+  taxon_table %>%
+    dplyr::filter(sum.taxonomy != "") %>%
+    dplyr::group_by(sum.taxonomy) %>%
+    dplyr::summarize_if(is.numeric, sum) %>%
+    dplyr::mutate(sum.taxonomy = as.character(sum.taxonomy)) %>%
+    data.frame
+}
+
+
+#' Takes an site-abundance table from Anacapa, along with a qiime-style mapping file, and returns a phyloseq object
+#' @param taxon_table Taxon table in the anacapa format
+#' @param metadata_file Metadata file with rows as sites, columns as variables
+#' @return phyloseq class object
+#' @author Gaurav Kandlikar
+#' @examples
+#' good_taxon_table <- data.frame(sum.taxonomy = c("a;b;c;d;f;u", "p;q;r;s;t;u"),
+#' site_1 = c(0,1), site_2 = c(10, 20))
+#' good_maps <- data.frame(site = c("site_1", "site_2"), season = c("wet", "dry"),
+#'  host = c("oak", "sage"))
+#' convert_anacapa_to_phyloseq(good_taxon_table, good_maps)
+#' @export
+
+
+convert_anacapa_to_phyloseq <- function(taxon_table, metadata_file) {
+  
+  # Validate the files
+  validate_input_files(taxon_table, metadata_file)
+
+  # Group the anacapa ouptut by taxonomy, if it has not yet happened, and turn it into a matrix
+  taxon_table2 <- group_anacapa_by_taxonomy(taxon_table) %>%
+    remove_rownames() %>%
+    tibble::column_to_rownames("sum.taxonomy") %>%
+    as.matrix
+  # Reorder the columns (sites) for ease of displaying later
+  taxon_table2 <- taxon_table2[ , order(colnames(taxon_table2))]
+
+  # Convert the matrix into a phyloseq otu_table object, with taxa as the rows
+  ana_taxon_table_physeq <- phyloseq::otu_table(taxon_table2, taxa_are_rows = TRUE)
+
+  # Extract the rownames of the matrix above- this has the full taxonomic path.
+  # Split the taxonomic path on semicolons, and turn the resulting matrix into
+  # a phyloseq tax_table object
+  taxon_names <- reshape2::colsplit(rownames(taxon_table2), ";",
+                          names = c("Domain","Phylum","Class","Order","Family","Genus","Species")) %>%
+    as.matrix
+  rownames(taxon_names) <- rownames(taxon_table2)
+
+  tax_physeq <- phyloseq::tax_table(taxon_names)
+  colnames(tax_physeq) <- c("Domain","Phylum","Class","Order","Family","Genus","Species")
+
+  # Make a phyloseq object out of the otu_table and the tax_table objects
+  physeq_object <- phyloseq::phyloseq(ana_taxon_table_physeq, tax_physeq)
+
+  # Make sure the mapping file (ie the site metadata) is ordered according to site name
+  rownames(metadata_file) <- metadata_file[, 1]
+  metadata_file <- metadata_file[order(metadata_file[, 1]), ]
+
+  # Convert the mapping file into a phyloseq sample_data object, and merge it with the
+  # phyloseq object created above to make a phyloseq object with otu table, tax table, and sample data.
+  sampledata <- phyloseq::sample_data(metadata_file)
+  sample_names(sampledata)
+  sample_names(physeq_object)
+  phyloseq::merge_phyloseq(physeq_object, sampledata)
+}
+
+#' Takes a phyloseq object with an otu_table object and returns a vegan style community matrix.
+#' @param physeq_object phyloseq object with an otu_table object within
+#' @return vegan-style community matrix
+#' @examples
+#' good_taxon_table <- data.frame(sum.taxonomy = c("a;b;c;d;f;u", "p;q;r;s;t;u"),
+#' site_1 = c(0,1), site_2 = c(10, 20))
+#' good_maps <- data.frame(site = c("site_1", "site_2"), season = c("wet", "dry"),
+#' host = c("oak", "sage"))
+#' physeq_object <- convert_anacapa_to_phyloseq(good_taxon_table, good_maps)
+#' vegan_otu(physeq_object)
+#' @export
+vegan_otu <- function(physeq_object) {
+  OTU <- phyloseq::otu_table(physeq_object)
+  if (phyloseq::taxa_are_rows(OTU)) {
+    OTU <- t(OTU)
+  }
+  return(methods::as(OTU, "matrix"))
+}
+
+#' Remove "xxx_seq_number" column from ana_taxon_table file if it exists
+#' takes one taxon table as its input, and if it include
+#' a column named "xxx_seq_number", it gets rid of that column - it's not of use to us
+#' any longer
+#'
+#' @param taxon_table taxonomy table from Anacapa
+#' @return ana_taxon_table file, with "xxx_seq_number" column removed (if it existed)
+#' @examples
+#' good_taxon_table <- data.frame(seq_number = c(1,2),
+#' sum.taxonomy = c("a;b;c;d;f;u", "p;q;r;s;t;u"),
+#' site_1 = c(0,1), site_2 = c(10, 20))
+#' scrub_seqNum_column(good_taxon_table)
+#' @export
+scrub_seqNum_column <- function(taxon_table) {
+  to_return <- taxon_table %>% dplyr::select(-dplyr::matches("seq_number"))
+  return(to_return)
+}
+
+#' Replace empty calls in Anacapa taxonomy tables with Unknown
+#' (that is what they effectively are to most users)
+#' @param taxon_table taxonomy table from Anacapa
+#' @return ana_taxon_table with scrubbed 'sum.taxonomy' column
+#' @examples
+#' good_taxon_table <- data.frame(sum.taxonomy = c("a;b;c;d;f;u", "p;q;r;s;t;u"),
+#' site_1 = c(0,1), site_2 = c(10, 20))
+#' scrub_taxon_paths(good_taxon_table)
+#' @export
+scrub_taxon_paths <- function(taxon_table) {
+  to_return <- taxon_table
+  new_sum_tax <- reshape2::colsplit(taxon_table$sum.taxonomy, ";",
+                          names = c("Domain","Phylum", "Class", "Order", "Family", "Genus", "Species"))
+
+  new_sum_tax <- new_sum_tax %>%
+    dplyr::mutate(Domain = ifelse(is.na(Domain) | Domain == "", "unknown", Domain))
+    dplyr::mutate(Phylum = ifelse(is.na(Phylum) | Phylum == "", "unknown", Phylum)) %>%
+    dplyr::mutate(Class = ifelse(is.na(Class) | Class == "", "unknown", Class)) %>%
+    dplyr::mutate(Order = ifelse(is.na(Order) | Order == "", "unknown", Order)) %>%
+    dplyr::mutate(Family = ifelse(is.na(Family) | Family == "", "unknown", Family)) %>%
+    dplyr::mutate(Genus = ifelse(is.na(Genus) | Genus == "", "unknown", Genus)) %>%
+    dplyr::mutate(Species = ifelse(is.na(Species)| Species == "", "unknown", Species))
+
+  new_sum_tax2 <- paste(new_sum_tax$Domain,
+    new_sum_tax$Phylum,
+                        new_sum_tax$Class,
+                        new_sum_tax$Order,
+                        new_sum_tax$Family,
+                        new_sum_tax$Genus,
+                        new_sum_tax$Species, sep = ";")
+  to_return$sum.taxonomy <- new_sum_tax2
+  return(to_return)
+}
+
+#' Verify that the input taxon_table file and the input mapping file meets specificationss
+#' The function takes one taxon table as its input, and verfies that it meets
+#' the expected standards.
+#' The standards incude:
+#' 1. Column names exist.
+#' 2. One of the columns is named "sum.taxonomy"
+#' 3. The "xxx_seq_number" column, if it ever existed, is removed
+#' 4. All columns apart from sum.taxonomy should be numeric
+#' 5. All columns apart from sum.taxonomy should have corresponding row in metadata file
+#' @param taxon_table taxonomy table from Anacapa
+#' @param metadata_file Qiime-style mapping
+#' @examples
+#' good_taxon_table <- data.frame(sum.taxonomy = c("a;b;c;d;f;u", "p;q;r;s;t;u"),
+#' site_1 = c(0,1), site_2 = c(10, 20))
+#' good_maps <- data.frame(site = c("site_1", "site_2"),
+#' season = c("wet", "dry"), host = c("oak", "sage"))
+#' validate_input_files(good_taxon_table, good_maps)
+#' @export
+validate_input_files <- function(taxon_table, metadata_file) {
+  # 1. Column names exist.
+  if (is.null(colnames(taxon_table))) {
+    stop("The input taxon table should have column names. The taxonomy column should be named 'sum.taxonomy'; the rest of the columns should be named according to their sample names.")
+  }
+
+  # 2. One of the columns is named "sum.taxonomy"
+  if (!("sum.taxonomy" %in% colnames(taxon_table))) {
+    stop("Please make sure that the taxonomy column in the input taxon table is named 'sum.taxonomy'!")
+  }
+
+  # 3. The "xxx_seq_number" column, if it ever existed, is removed
+  if (any(stringr::str_detect(colnames(taxon_table), "seq_number"))) {
+    stop("Please makes sure that you have removed the 'xxx_seq_number' column from the taxon table (note: this can be done with the function `scrub_seqNum_column`)")
+  }
+
+  # 4. All columns apart from sum.taxonomy should be numeric
+  if (!(all(sapply(taxon_table %>% ungroup() %>%  dplyr::select(-sum.taxonomy), is.numeric)))) {
+    stop("Please make sure that all columns apart from sum.taxonomy only contain numeric data!")
+  }
+
+  # 5. All columns apart from sum.taxonomy should have corresponding row in metadata file
+ # if (!(all(colnames(taxon_table %>% dplyr::select(-sum.taxonomy)) %in% metadata_file[, 1]))) {
+  #  stop("Please make sure that each sample in your taxon table has a corresponding row in the mapping file!")
+  #}
+
+
+}
+
+```
+
+```{r}
+
+site_eindex %>%
+  pivot_longer(., cols = `Bechers`:`Water_Canyon`, values_to="e_index", names_to = "Site") %>%
+   ungroup()  %>% 
+  dplyr::select(Site) %>% 
+  distinct() %>% 
+  left_join(site_metadata) %>%
+  ungroup() %>%  ungroup() %>% dplyr::select(Site,Location,temp_2018,avg_temp_total) %>% 
+  distinct() %>% mutate(., Sample = Site) %>% distinct() %>% as.data.frame()-> site_meta
+
+```
+### Combined Surfperch
+```{r}
+all_samples_reads %>% 
+  pivot_longer(cols=`BBA_1`:`WCC_3`, names_to="Sample", values_to="nReads") %>% 
+  mutate(., Embiotocidae =case_when(str_detect(sum.taxonomy,"Eukaryota;Chordata;Actinopteri;;Embiotocidae;;") ~ "Surfperch",
+                                    str_detect(sum.taxonomy,"Eukaryota;Chordata;Actinopteri;;Embiotocidae;Amphistichus;") ~ "Surfperch",
+                                    TRUE ~"Other Fish")) %>% 
+  mutate(., sum.taxonomy = if_else(Embiotocidae=="Surfperch","Eukaryota;Chordata;Actinopteri;;Embiotocidae;Surfperch;Surfperch",sum.taxonomy)) %>% 
+  dplyr::select(-Embiotocidae) %>% 
+  group_by(sum.taxonomy, Sample) %>% 
+  dplyr::summarise(nReads =sum(nReads)) %>% 
+  pivot_wider(names_from = Sample, values_from = nReads) -> all_samples_reads_combined_surfperch
+
+
+all_samples_reads %>% 
+  pivot_longer(cols=`BBA_1`:`WCC_3`, names_to="Sample", values_to="nReads") %>% 
+  mutate(., Embiotocidae =case_when(str_detect(sum.taxonomy,"Eukaryota;Chordata;Actinopteri;;Embiotocidae;;") ~ "Surfperch",
+                                    str_detect(sum.taxonomy,"Eukaryota;Chordata;Actinopteri;;Embiotocidae;Amphistichus;") ~ "Surfperch",
+                                    TRUE ~"Other Fish")) %>% 
+  mutate(., sum.taxonomy = if_else(Embiotocidae=="Surfperch","Eukaryota;Chordata;Actinopteri;;Embiotocidae;Surfperch;Surfperch",sum.taxonomy)) %>% 
+  dplyr::select(-Embiotocidae) %>% 
+  group_by(sum.taxonomy, Sample) %>% 
+  dplyr::summarise(nReads =sum(nReads)) %>% 
+  ungroup() %>% 
+  group_by(Sample) %>% 
+  mutate(.,Tot_reads=sum(nReads),
+         prop_reads=nReads/Tot_reads) %>% 
+  filter(., Tot_reads >0) -> int5
+  
+int5 %>% 
+  ungroup() %>% 
+  group_by(sum.taxonomy) %>% 
+  dplyr::summarise(max_reads=max(prop_reads)) -> int5_max
+
+int5 %>% 
+  left_join(int5_max) %>% 
+  mutate(., e_index = prop_reads/max_reads) %>% 
+  ungroup() %>% 
+  dplyr::select(sum.taxonomy, Sample, e_index) %>% 
+  pivot_wider(names_from = Sample, values_from = e_index) -> all_samples_combined_surfperch
+```
+
+```{r}
+colnames(site_reads)
+site_reads %>%
+  pivot_longer(cols=`Ben_Weston`:`Emerald_Bay`, names_to="Sample", values_to="nReads") %>% 
+  mutate(., Embiotocidae =case_when(str_detect(sum.taxonomy,"Eukaryota;Chordata;Actinopteri;;Embiotocidae;;") ~ "Surfperch",
+                                    str_detect(sum.taxonomy,"Eukaryota;Chordata;Actinopteri;;Embiotocidae;Amphistichus;") ~ "Surfperch",
+                                    TRUE ~"Other Fish")) %>% 
+  mutate(., sum.taxonomy = if_else(Embiotocidae=="Surfperch","Eukaryota;Chordata;Actinopteri;;Embiotocidae;Surfperch;Surfperch",sum.taxonomy)) %>% 
+  dplyr::select(-Embiotocidae) %>% 
+  group_by(sum.taxonomy, Sample) %>% 
+  dplyr::summarise(nReads =sum(nReads)) %>% 
+  pivot_wider(names_from = Sample, values_from = nReads) -> all_sites_reads_combined_surfperch
+
+
+site_reads %>% 
+  pivot_longer(cols=`Ben_Weston`:`Emerald_Bay`, names_to="Sample", values_to="nReads") %>% 
+  mutate(., Embiotocidae =case_when(str_detect(sum.taxonomy,"Eukaryota;Chordata;Actinopteri;;Embiotocidae;;") ~ "Surfperch",
+                                    str_detect(sum.taxonomy,"Eukaryota;Chordata;Actinopteri;;Embiotocidae;Amphistichus;") ~ "Surfperch",
+                                    TRUE ~"Other Fish")) %>% 
+  mutate(., sum.taxonomy = if_else(Embiotocidae=="Surfperch","Eukaryota;Chordata;Actinopteri;;Embiotocidae;Surfperch;Surfperch",sum.taxonomy)) %>% 
+  dplyr::select(-Embiotocidae) %>% 
+  group_by(sum.taxonomy, Sample) %>% 
+  dplyr::summarise(nReads =sum(nReads)) %>% 
+  ungroup() %>% 
+  group_by(Sample) %>% 
+  mutate(.,Tot_reads=sum(nReads),
+         prop_reads=nReads/Tot_reads) %>% 
+  filter(., Tot_reads >0) -> int6
+  
+int6 %>% 
+  ungroup() %>% 
+  group_by(sum.taxonomy) %>% 
+  dplyr::summarise(max_reads=max(prop_reads)) -> int6_max
+
+int6 %>% 
+  left_join(int6_max) %>% 
+  mutate(., e_index = prop_reads/max_reads) %>% 
+  ungroup() %>% 
+  dplyr::select(sum.taxonomy, Sample, e_index) %>% 
+  pivot_wider(names_from = Sample, values_from = e_index) -> all_sites_combined_surfperch
+```
+
+
+### Build eDNA Only Phyloseq Objects
+```{r}
+physeq_obj.site_eindex <- convert_anacapa_to_phyloseq(site_eindex, site_metadata)
+physeq_obj.site_reads <- convert_anacapa_to_phyloseq(site_reads, site_metadata)
+
+physeq_obj.all_eindex <- convert_anacapa_to_phyloseq(all_samples, metadata)
+physeq_obj.all_reads <- convert_anacapa_to_phyloseq(all_samples_reads, metadata)
+
+physeq_obj.all_eindex_surf_combo <- convert_anacapa_to_phyloseq(all_samples_combined_surfperch, metadata)
+physeq_obj.all_reads_surf_combo <- convert_anacapa_to_phyloseq(all_samples_reads_combined_surfperch, metadata)
+
+physeq_obj.site_eindex_surf_combo <- convert_anacapa_to_phyloseq(all_sites_combined_surfperch, site_metadata)
+physeq_obj.site_reads_surf_combo <- convert_anacapa_to_phyloseq(all_sites_reads_combined_surfperch, site_metadata)
+
+```
+
+##### Exclude Birds and Mammals
+```{r}
+physeq_obj.site_eindex <- subset_taxa(physeq_obj.site_eindex, Class %in% c("Actinopteri" ,   "Chondrichthyes"))
+physeq_obj.site_reads <- subset_taxa(physeq_obj.site_reads, Class %in% c("Actinopteri" ,   "Chondrichthyes"))
+
+physeq_obj.all_eindex <- subset_taxa(physeq_obj.all_eindex, Class %in% c("Actinopteri" ,   "Chondrichthyes"))
+physeq_obj.all_reads <- subset_taxa(physeq_obj.all_reads, Class %in% c("Actinopteri" ,   "Chondrichthyes"))
+
+
+physeq_obj.all_eindex_surf_combo <- subset_taxa(physeq_obj.all_eindex_surf_combo, Class %in% c("Actinopteri" ,   "Chondrichthyes"))
+physeq_obj.all_reads_surf_combo <- subset_taxa(physeq_obj.all_reads_surf_combo, Class %in% c("Actinopteri" ,   "Chondrichthyes"))
+
+
+all_samples_reads %>% dplyr::select(sum.taxonomy) %>% distinct() %>% 
+  filter(str_detect(sum.taxonomy, "Mammalia"))
+
+all_samples_reads %>% dplyr::select(sum.taxonomy) %>% distinct() %>% 
+  filter(str_detect(sum.taxonomy, "Aves"))
+```
+
+### Import BRUV data
+
+```{r}
+
+read.csv(here("data","surfperch_species_zjg.csv")) %>% as_tibble()-> surf_perch_ids
+
+```
+
+### Import BRUV data
+```{r}
+read.csv(here("data","bruv_species_final_052421.csv")) %>% as_tibble() %>% dplyr::select(-X)-> bruv
+```
+
+### Import Seine data
+```{r}
+
+read.csv(here("data","seine_only_final_data_052421.csv")) %>% as_tibble() %>% dplyr::select(-X)-> seine
+
+```
+
+```{r}
+bruv$Species %>%  unique() -> bruv_species
+seine$Species %>%  unique() -> seine_species
+
+setdiff(bruv_species,seine_species)
+setdiff(seine_species,bruv_species)
+intersect(seine_species,bruv_species)
+```
+
+# General Summary Statistics
+
+### eDNA Blanks
+
+```{r}
+ASV.nested %>% 
+  dplyr::select(Miseq_run, Blanks) %>% 
+  unnest(Blanks) %>%
+  filter(., sum.taxonomy !="") %>% 
+  group_by(sum.taxonomy) %>% 
+  dplyr::summarise(tot_reads=sum(nReads))
+
+ASV.nested %>% 
+  dplyr::select(Miseq_run, Blanks) %>% 
+  unnest(Blanks) %>%
+  filter(., sum.taxonomy !="") %>% 
+  dplyr::summarise(tot_reads=sum(nReads))
+
+ASV.nested %>% 
+  dplyr::select(Miseq_run, Blanks) %>% 
+  unnest(Blanks) %>%
+  filter(., sum.taxonomy !="") %>% dplyr::select(sum.taxonomy) -> blank_species
+
+ASV.nested %>% 
+  dplyr::select(Step4.tibble, Miseq_run) %>% 
+  unnest() %>% 
+  filter(., sum.taxonomy %in% blank_species$sum.taxonomy) %>% 
+  group_by(sum.taxonomy) %>% 
+  dplyr::summarise(ASVs = n_distinct(seq_number), Tot_reads = sum(nReads)) %>% 
+  arrange(desc(Tot_reads))
+
+
+ASV.nested %>% 
+  dplyr::select(Step4.tibble, Miseq_run) %>% 
+  unnest() %>% 
+  group_by(sum.taxonomy) %>% 
+  dplyr::summarise(ASVs = n_distinct(seq_number), Tot_reads = sum(nReads)) %>% 
+  arrange(desc(Tot_reads))
+
+```
+### How Many Reads pre decontamination
+```{r}
+ASV.table_long %>% 
+  group_by(Miseq_run) %>% 
+  dplyr::summarise(ASVs = n_distinct(seq_number), Tot_reads = sum(reads))
+
+ASV.table_used %>% 
+  group_by(Miseq_run) %>% 
+  filter(., str_detect(sum.taxonomy, "Syngnathus")) %>% 
+  filter(., str_detect(seq_number, "merge")) %>% 
+  filter(., reads >0)
+
+hash.key %>% 
+    filter(., str_detect(sum.taxonomy, "Syngnathus")) 
+
+
+```
+
+### How Many ASVs and Reads passed decontamination
+```{r}
+ASV.nested %>% 
+  dplyr::select(Step4.tibble, Miseq_run) %>% 
+  unnest() %>% 
+  dplyr::summarise(ASVs = n_distinct(seq_number), Tot_reads = sum(nReads))
+
+ASV.nested %>% 
+  dplyr::select(Step4.tibble, Miseq_run) %>% 
+  unnest() %>% 
+    group_by(Miseq_run1) %>% 
+  dplyr::summarise(ASVs = n_distinct(seq_number), Tot_reads = sum(nReads))
+```
+
+### Sample Read Depth Stats
+```{r}
+ASV.nested %>% 
+  dplyr::select(Step4.tibble, Miseq_run) %>% 
+  unnest() %>% 
+  group_by(Miseq_run1, sample) %>% 
+  dplyr::summarise(Tot_reads = sum(nReads)) %>% 
+  dplyr::summarise(max(Tot_reads),min(Tot_reads),mean(Tot_reads), n_distinct(sample))
+
+```
+
+##### Convert eDNA phyloseq to dataframes
+```{r}
+ #df for eDNA by Site
+phyloseq_to_df(physeq_obj.site_eindex) %>%
+  dplyr::select(.,-Domain,-OTU,-Phylum, -Class,-Order,-Family,-Genus) %>%
+  #remove ASVs without species level ID
+  filter(Species != "") %>%
+#convert to a long data frame
+  pivot_longer(.,names_to="Sample",values_to="e_index", cols=`Bechers`:`Water_Canyon`) %>%
+#rejoin the metadata
+  left_join(site_metadata, by=c("Sample"="Site")) -> e_index_long
+#remove spaces 
+as.data.frame(apply(e_index_long,2,function(Species)gsub('\\s+', '_',Species))) -> e_index_long_species_list
+# pick which cols you actually want
+  #dplyr::select(Species,Sample,e_index) 
+  
+  #df for eDNA by Biological Replicate
+phyloseq_to_df(physeq_obj.all_eindex) %>%
+  dplyr::select(.,-Domain,-OTU,-Phylum, -Class,-Order,-Family,-Genus) %>%
+  #remove ASVs without species level ID
+  filter(Species != "") %>%
+#convert to a long data frame
+  pivot_longer(.,names_to="Sample",values_to="e_index", cols=`BBA_1`:`WCC_3`) %>%
+#rejoin the metadata
+  left_join(metadata, by=c("Sample"="New_name")) -> e_index_all_long
+
+
+ #df for eDNA by Biological Replicate
+phyloseq_to_df(physeq_obj.all_eindex_surf_combo) %>%
+  dplyr::select(.,-Domain,-OTU,-Phylum, -Class,-Order,-Family,-Genus) %>%
+  #remove ASVs without species level ID
+  filter(Species != "") %>%
+#convert to a long data frame
+  pivot_longer(.,names_to="Sample",values_to="e_index", cols=`BBA_1`:`WCC_3`) %>%
+#rejoin the metadata
+  left_join(metadata, by=c("Sample"="New_name")) -> e_index_all_long_surf_combo
+
+#To find number of class, order, family 
+phyloseq_to_df(physeq_obj.all_eindex) %>%
+  dplyr::select(.,-Domain,-OTU) %>%
+  #remove ASVs without species level ID
+  filter(Species != "") %>%
+#convert to a long data frame
+  pivot_longer(.,names_to="Sample",values_to="e_index", cols=`BBA_1`:`WCC_3`) %>%
+#rejoin the metadata
+  left_join(metadata, by=c("Sample"="New_name")) -> e_index_taxonomy_long
+
+#Number of Phylum = 1
+unique(e_index_taxonomy_long$Phylum)
+
+#Number of Classes = 2
+unique(e_index_taxonomy_long$Class)
+
+#Number of Order = 26
+unique(e_index_taxonomy_long$Order)
+unique(e_index_taxonomy_long$Order)  %>%  length()
+
+#Number of Families = 47
+unique(e_index_taxonomy_long$Family)
+unique(e_index_taxonomy_long$Family) %>%  length()
+
+#Number of Genera = 79
+unique(e_index_taxonomy_long$Genus) 
+unique(e_index_taxonomy_long$Genus) %>%  length()
+
+#Number of Species = 89
+unique(e_index_taxonomy_long$Species) %>%  length()
+
+unique(e_index_taxonomy_long$Species) %>% sort()
+```
+
+### eDNA Summary Statistics
+```{r}
+saveRDS(e_index_all_long,here("e_index_all_long.RDS"))
+  #Summary Statistics for eDNA by biological replicate
+e_index_all_long %>% filter(e_index>0) %>% group_by(Sample) %>% dplyr::summarise(total_species_eDNA = n_distinct(Species)) -> species_per_sample_eDNAall
+  
+species_per_sample_eDNAall %>% left_join(metadata, by = c("Sample" = "New_name")) %>% group_by(Site) %>% 
+  dplyr::summarise(avg_sp_numb_eDNA = mean(total_species_eDNA),
+                    sd_sp_numb_eDNA= sd(total_species_eDNA),
+                    max_species_number = max(total_species_eDNA), 
+                    min_species_number = min(total_species_eDNA)) -> eDNAbiolsummstatistics
+# Max Species Number at a Site Biol Replicate
+## 40 at R_Beach
+
+# Min Species Number at a Site Biol Replicate
+## 6 at Christy, Soledad and Southeast_Anchorage
+
+ #Summary Statistics for eDNA by Site
+e_index_all_long %>% 
+  filter(e_index>0) %>% 
+  group_by(Site) %>%
+  dplyr::summarise(total_species_eDNA = n_distinct(Species)) -> species_per_site_eDNA
+
+species_per_site_eDNA %>% 
+  left_join(metadata, by = c("Site" = "Site")) %>% 
+  dplyr::summarise(avg_sp_numb_eDNA = mean(total_species_eDNA),
+                    sd_sp_numb_eDNA= sd(total_species_eDNA),
+                    max_species_number = max(total_species_eDNA), 
+                    min_species_number = min(total_species_eDNA)) 
+
+#Average Species per Site = 34.7	 +/- 11.11
+#MaxSpeciesNumber = 59
+#MinSpeciesNumber = 17
+
+```
+
+
+## eDNA Number of Species per Site
+```{r}
+
+e_index_long %>% filter(e_index>0) %>% group_by(Sample) %>% dplyr::summarise(total_species_eDNA = n_distinct(Species)) -> eDNA_site_species_total
+
+#Graph Total Number Species found by eDNA by Site
+ggplot(data=eDNA_site_species_total, aes(x=Sample, y = total_species_eDNA)) + geom_bar(fill = col_dar2[4], stat = "identity") +  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 60, size=10, hjust = 1))  + 
+  scale_x_discrete(limits = c("Cuylers_Harbor",  "Sandy_Point", "Soledad", "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), labels = c("Cuyler Harbor",  "Sandy Point", "Soledad †", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica")) + ggtitle("Total Species in eDNA by Site") +
+  labs(x ="Site Name", y = "Number of Species (eDNA)")
+```
+
+
+
+##BRUV Summary Statistics
+```{r}
+seine %>%  dplyr::select(Site, Site_Code) %>%  distinct()
+
+#Supplemental Table
+bruv %>% 
+  dplyr::select(Site, BRUV_Number,Species,MaxN) %>% 
+  group_by(Site, BRUV_Number,Species) %>% 
+  dplyr::summarise("MaxN_" = sum(MaxN)) %>% na.omit()  %>% 
+  dplyr::select(Site, Species,MaxN_) %>% unique() -> supplementalbruvtable5
+write.csv(supplementalbruvtable5, file = here("data","supplementalbruvtable5.csv"))
+
+#Number of Individuals in BRUV = 1114
+sum(bruv$MaxN)
+
+#Number of Species in BRUV = 31 species 33 taxonomic assigments
+unique(bruv$Species) %>%  length()
+
+#Number of Genus in BRUV = 30
+
+#Number of Family in BRUV = 21
+
+#Summary Statistics
+#Average number of individuals per site
+bruv %>% 
+  group_by(Site) %>%
+  dplyr::summarise(tot_ind_per_site = sum(MaxN), avg_per_site = mean(MaxN), sd_per_site= sd(MaxN), max_per_site = max(MaxN), min_per_site = min(MaxN), species_per_site = n_distinct(Species)) -> bruvsumstats_site
+
+bruvsumstats_site$species_per_site %>% max
+bruvsumstats_site$species_per_site %>% min
+  
+#Average number of individuals per site
+bruv %>% 
+  group_by(Site) %>%
+  dplyr::summarise(tot_ind_per_site = sum(MaxN)) %>% 
+  ungroup() %>% 
+  dplyr::summarise(mean(tot_ind_per_site),
+                   sd(tot_ind_per_site), 
+                   max(tot_ind_per_site),
+                   min(tot_ind_per_site))
+
+#Average number of species per site
+bruv %>% 
+  group_by(Site) %>%
+  dplyr::summarise(species_per_bruv = n_distinct(Species)) %>% 
+  ungroup() %>% 
+  dplyr::summarise(mean(species_per_bruv),
+                   sd(species_per_bruv), 
+                   max(species_per_bruv),
+                   min(species_per_bruv))
+```
+
+
+
+
+##Seine Summary Statistics
+```{r}
+#Supplemental Table
+seine %>% 
+  dplyr::select(Site, Haul_number,Species,Count) %>%
+  group_by(Site,Haul_number, Species) %>%
+  dplyr::summarise("count" = sum(Count)) %>% 
+  na.omit() %>% unique() -> supplementalseinetable3
+write.csv(supplementalseinetable3, file = here("data","supplementalseinetable3.csv"))
+
+#Species by Site Code
+seine %>% 
+  dplyr::select(Site_Code, Species,Count) %>%
+  group_by(Site_Code, Species) %>%
+  dplyr::summarise("count" = sum(Count)) %>%
+  na.omit() %>%
+  unique() -> seine_by_sitecode
+seine_by_sitecode %>% dplyr::select(Site_Code,Species,count) -> seine_by_sitecode
+
+#Number of Individuals in Seine = 1359
+sum(seine_by_sitecode$count)
+
+#Number of Subclasses = 2
+unique(seine$Subclass)
+
+#Number of Families = 13
+unique(seine$Family)
+
+seine$Species %>% unique() %>% sort()
+  
+
+#Number of Genus = 24
+as.data.frame(seine_species) -> dfseine_species
+write.csv(dfseine_species, file = here("data","dfseine_species.csv"))
+
+#Average number of individuals per site
+
+#Average Individuals per Site
+seine %>% 
+  group_by(Site) %>% 
+  dplyr::summarise(tot_ind_per_site = sum(Count)) %>% 
+  ungroup() %>% 
+  dplyr::summarise(mean(tot_ind_per_site),
+                   sd(tot_ind_per_site), 
+                   max(tot_ind_per_site),
+                   min(tot_ind_per_site))
+#Average Individuals per Site = 75.5  +/-  82.8
+#MaxSpeciesNumber = 325
+#MinSpeciesNumber = 8
+
+seine %>% 
+  group_by(Site) %>%
+  dplyr::summarise(species_per_seine = n_distinct(Species)) %>% 
+  ungroup() %>% 
+  dplyr::summarise(mean(species_per_seine),
+                   sd(species_per_seine), 
+                   max(species_per_seine),
+                   min(species_per_seine))
+
+#Average Species per Site = 4 +/- 2.54
+#MaxSpeciesNumber = 10
+#MinSpeciesNumber = 1
+
+```
+
+
+
+```{r}
+#create column for Seine method
+seine %>%
+  mutate(., Species = str_replace(Species, "_", " ")) %>% 
+  group_by(Site, Species) %>% 
+  dplyr::summarise(Seine_count = sum(Count)) %>% 
+  dplyr::select(Site, Species, Seine_count)-> seine_compare
+
+#create column for BRUV method
+bruv %>%
+    mutate(., Species = str_replace(Species, "_", " ")) %>% 
+  group_by(Site, Species) %>% 
+  dplyr::summarise(Bruv_MaxN = sum(MaxN)) %>% 
+  dplyr::select(Site, Species, Bruv_MaxN)-> bruv_compare
+
+#merge Seine and BRUV methods
+seine_and_bruv <- merge(seine_compare, bruv_compare, by = c("Species", "Site"), all =TRUE)
+
+seine_and_bruv %>% 
+  dplyr::mutate(Seine_count = replace_na(Seine_count, 0),
+                Bruv_MaxN = replace_na(Bruv_MaxN, 0)) -> seine_and_bruv
+
+#create column for eDNA method
+e_index_long %>% 
+  dplyr::select(Site = Sample, Species, e_index) -> e_index_compare
+
+#merge Seine, BRUV and eDNA
+merge(seine_and_bruv, e_index_compare, by = c("Species", "Site"), all =TRUE) -> three_compare
+
+three_compare %>% 
+  dplyr::mutate(Seine_count = replace_na(Seine_count, 0),
+                Bruv_MaxN = replace_na(Bruv_MaxN, 0),
+                e_index = replace_na(e_index, 0)) -> three_compare
+
+```
+
+## Figure S1. Number of Species per Site per method
+
+```{r}
+#create column for Seine method
+seine %>%
+  group_by(Site, Haul_number) %>% 
+  dplyr::summarise(Seine_species = n_distinct(Species)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::group_by(Site) %>% 
+  dplyr::summarise(mean_species = mean(Seine_species), sd_species = sd(Seine_species)) %>%  mutate(., method = "seine")  -> seine_species_compare
+
+#create column for BRUV method
+bruv %>%
+  group_by(Site,BRUV_Number) %>% 
+  dplyr::summarise(Bruv_species = n_distinct(Species)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::group_by(Site) %>% 
+  dplyr::summarise(mean_species = mean(Bruv_species), sd_species = sd(Bruv_species)) %>% 
+     mutate(., method = "bruv")-> bruv_species_compare
+
+#merge Seine and BRUV methods
+seine_and_bruv_combined <- rbind(seine_species_compare, bruv_species_compare)
+
+#create column for eDNA method
+e_index_all_long %>% 
+  filter(., e_index > 0) %>% 
+  group_by(Site,Bio_rep, Tech_rep) %>% 
+  dplyr::summarise(eDNA_species = n_distinct(Species)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::group_by(Site) %>% 
+  dplyr::summarise(mean_species = mean(eDNA_species), sd_species = sd(eDNA_species)) %>% 
+     mutate(., method = "eDNA") -> e_index_species_compare
+
+#merge Seine, BRUV and eDNA
+rbind(seine_and_bruv_combined, e_index_species_compare) -> three_species_compare
+
+three_species_compare %>% 
+  left_join(site_meta) %>% 
+  mutate(., Location = str_replace_all(Location, "_"," ")) %>% 
+  mutate(., Location = case_when(str_detect(Location,"Island") ~Location, TRUE ~ "Mainland")) %>%  distinct()-> three_species_compare_long
+
+three_species_compare_long %>%
+  mutate(., Site = str_replace_all(Site, "_"," ")) -> three_species_compare_long2
+
+
+three_species_compare_long2 %>%
+   add_row(Site ="Soledad",   mean_species = 0, sd_species =0, method = "bruv", Location ="Santa Rosa Island", temp_2018 =15.8    ,       avg_temp_total =15.0 ) -> three_species_compare_long2
+ 
+
+#Make a Plot
+supplementalfigure1 <- ggplot(three_species_compare_long2, aes(x = Site, y=`mean_species`, fill = method)) 
+
+supplementalfigure1+ facet_grid(~Location, scales = "free") +
+  geom_bar(stat = "identity", position = "dodge")  +
+  geom_errorbar(aes(ymin = `mean_species`-sd_species, ymax = `mean_species`+sd_species, color=method),
+                position = position_dodge2(width = 0.5, padding = 0.5)) +
+  scale_fill_manual(limits = c( "bruv", "eDNA", "seine"), name = "Method", labels = c("BRUV", "eDNA", "Seine"), values = c(col_gbp1[2],col_moo3[1],col_zis1[3])) +  labs(x ="Site Name", y = "Mean Species Richness") +
+  scale_colour_manual(limits = c( "bruv", "eDNA", "seine"), name = "Method", labels = c("BRUV", "eDNA", "Seine"), values = c(col_gbp1[2],col_moo3[1],col_zis1[3])) +  labs(x ="Site Name", y = "Mean Species Richness") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 60, size=14, hjust = 1), text = element_text(size=20), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), strip.text = element_text(size =10), legend.position = "bottom")  -> supplementalfigure1
+
+f_labels <- three_species_compare_long2 %>% dplyr::select(Location, method) %>%  distinct() %>% mutate(label = case_when(Location =="Santa Rosa Island"&
+                                                                                                                         method=="bruv" ~"+",
+                                                                                                       TRUE ~""))
+
+supplementalfigure1 +
+  geom_text(x = "Soledad", y = 2, aes(label = label), data = f_labels, hjust=1.5,color=col_gbp1[2], size=6) -> supplementalfigure1
+
+
+
+ggsave(plot= supplementalfigure1, 
+       filename = here("Figures","S1.tiff"),
+       width=16,
+       height = 8,
+       dpi = 300,
+      units = c("in"))
+
+```
+
+## Species Richness ANOVA
+```{r}
+
+three_compare %>%  as_tibble()
+three_species_compare_long %>%  na.omit() -> compare_4_anova
+
+compare_4_anova$method <- as.factor(compare_4_anova$method)
+res.aov <- aov(compare_4_anova$`mean_species` ~ compare_4_anova$method)
+summary(res.aov)
+
+TukeyHSD(res.aov)
+```
+
+
+```{r}
+three_compare %>% 
+  mutate(., Visual_presence = if_else(Seine_count+Bruv_MaxN > 0, 1, 0), 
+            eDNA_presence = if_else(e_index > 0, 1, 0),
+            BRUV_presence = if_else(Bruv_MaxN > 0, 1, 0),
+            seine_presence=  if_else(Seine_count > 0, 1, 0))-> three_compare
+
+saveRDS(three_compare, here("three_compare.rds"))
+
+three_compare %>% as_tibble() %>% 
+  dplyr::select(Species, Site, Visual_presence,eDNA_presence) %>% 
+  pivot_longer(cols= `Visual_presence`:`eDNA_presence`, names_to = "Method", values_to="Presence") -> PA_viz_long
+
+PA_viz_long %>% 
+  filter(., Presence > 0) %>% 
+  group_by(Site,Method ) %>% 
+  dplyr::summarise(Number_of_species = n_distinct(Species)) %>% 
+  pivot_wider(names_from = Method, values_from = Number_of_species) -> viz_eDNA_species
+```
+
+
+
+# VennDiagram
+
+##### objects for VennDiagram
+
+```{r}
+#BRUV
+uniquesp_bruv_vennd <- unique(bruv$Species)
+
+#seines
+uniquesp_seinevennd<-unique(seine$Species)
+
+#eDNA
+eDNA_for_vennd = prune_taxa(taxa_sums(physeq_obj.all_reads) > 0.00000000000000000001, physeq_obj.all_reads)
+get_taxa_unique(eDNA_for_vennd, "Species") -> eDNAsp_vennd
+eDNAsp_vennd<-gsub(" ", "_", eDNAsp_vennd)
+eDNAsp_vennd<-eDNAsp_vennd[-1] #remove empty species
+#eDNAsp_vennd %>%  sort() #89 species
+eDNAsp_vennd %>%  sort() %>% kable()
+```
+
+## Figure 2 TripleVennDiagram
+
+```{r}
+intersect(intersect(eDNAsp_vennd,uniquesp_seinevennd), uniquesp_bruv_vennd) -> common_species
+setdiff(uniquesp_bruv_vennd,union(eDNAsp_vennd, uniquesp_seinevennd)) -> bruv_species_unique
+setdiff(uniquesp_seinevennd,union(eDNAsp_vennd, uniquesp_bruv_vennd)) -> seine_species_unique
+setdiff(eDNAsp_vennd,union(uniquesp_bruv_vennd, uniquesp_seinevennd)) -> eDNA_species_unique
+setdiff(intersect(uniquesp_bruv_vennd, uniquesp_seinevennd),eDNAsp_vennd) -> bruv_seine_species_common
+setdiff(intersect(uniquesp_bruv_vennd, eDNAsp_vennd),uniquesp_seinevennd) -> bruv_eDNA_species_common
+setdiff(intersect(eDNAsp_vennd, uniquesp_seinevennd),uniquesp_bruv_vennd) -> eDNA_seine_species_common
+
+grid.newpage()
+venn_plot <- draw.triple.venn(area1 = length(uniquesp_bruv_vennd),
+                 area2 = length(uniquesp_seinevennd),
+                 area3 = length(eDNAsp_vennd),
+                 n12 = (length(bruv_seine_species_common)+length(common_species)),
+                 n23 = (length(eDNA_seine_species_common)+length(common_species)),
+                 n13 = (length(bruv_eDNA_species_common)+length(common_species)),
+                 n123 = length(common_species),
+                 lwd = rep(1, 3),
+                 lty =rep("solid", 3), 
+                 col = rep("black", 3),
+                 cex= rep(2, 7),
+                 cat.pos = c(-40, 40, 180),
+                 cat.dist =c(0.08, 0.08, 0.04),
+                 fontface = rep("plain", 7),
+                 fontfamily = rep("sans", 7),
+                 cat.cex = rep(2, 3),
+                 cat.fontface = rep("plain", 3),
+                 cat.fontfamily = rep("sans", 3),
+                 category = c("BRUV", "Seine", "eDNA"),  
+                 fill = c(col_gbp1[2],col_zis1[3],col_moo3[1]),
+                 alpha = 0.8)
+
+grid.draw(venn_plot)
+
+#59 Unique Species by eDNA, #6 missed species
+
+png(filename = here("Figures","Figure_2.tiff"),
+       width=12,
+       height = 8,
+       res = 300,
+      units = c("in"))
+
+grid.draw(venn_plot)
+
+dev.off()
+
+```
+
+#### S2 TripleVennDiagram - Surfzone species
+
+## Surf Zone Species Only
+```{r}
+#Import Habitat Data
+read.csv(here("data","habitat_metadata.csv")) -> habitats
+
+#Select surfzone species only
+habitats %>% as_tibble() %>% 
+  filter(surf_zone == "Yes") %>% 
+  mutate(., Species = recode(Species, 
+                             `Xenistius_californiensis`="Brachygenys_californiensis",
+                            `Urolophus_halleri`= "Urobatis_halleri",
+                            `Oxyjulis_californica`="Halichoeres_californica" ,
+                            `Semicossyphus_pulcher`="Bodianus_pulcher")) %>% 
+  dplyr::select(Species) -> surfzone_sp
+
+#Remove underscores
+gsub("_", " ", surfzone_sp$Species) -> surfzonesp
+
+
+```
+
+
+```{r}
+setdiff(eDNA_species_unique, surfzone_sp$Species) -> non_surfzone_eDNA
+
+non_surfzone_eDNA %>% as_tibble() %>% 
+  transmute(Species = value ) %>% 
+  left_join(habitats) %>% 
+  group_by(intertidal_surfzone_nearshore_offshore,sandybottom_rockyreef_pelagic) %>% 
+  count()
+```
+
+#### Venn Diagram of Matching Species Only
+
+```{r}
+
+intersect(eDNAsp_vennd, str_replace(surfzone_sp$Species," ","_")) -> eDNAsp_venndsp
+intersect(uniquesp_seinevennd, str_replace(surfzone_sp$Species," ","_")) -> seinesp_venndsp
+intersect(uniquesp_bruv_vennd, str_replace(surfzone_sp$Species," ","_")) -> bruvsp_venndsp
+
+intersect(intersect(eDNAsp_venndsp,seinesp_venndsp), bruvsp_venndsp) -> sz.common_species
+setdiff(bruvsp_venndsp,union(eDNAsp_venndsp, seinesp_venndsp)) -> sz.bruv_species_unique
+setdiff(seinesp_venndsp,union(eDNAsp_venndsp, bruvsp_venndsp)) -> sz.seine_species_unique
+setdiff(eDNAsp_venndsp,union(bruvsp_venndsp, seinesp_venndsp)) -> sz.eDNA_species_unique
+setdiff(intersect(bruvsp_venndsp, seinesp_venndsp),eDNAsp_venndsp) -> sz.bruv_seine_species_common
+setdiff(intersect(bruvsp_venndsp, eDNAsp_venndsp),seinesp_venndsp) -> sz.bruv_eDNA_species_common
+setdiff(intersect(eDNAsp_venndsp, seinesp_venndsp),bruvsp_venndsp) -> sz.eDNA_seine_species_common
+
+grid.newpage()
+sp.venn_plot <- draw.triple.venn(area1 = length(bruvsp_venndsp),
+                 area2 = length(seinesp_venndsp),
+                 area3 = length(eDNAsp_venndsp),
+                 n12 = (length(sz.bruv_seine_species_common)+length(sz.common_species)),
+                 n23 = (length(sz.eDNA_seine_species_common)+length(sz.common_species)),
+                 n13 = (length(sz.bruv_eDNA_species_common)+length(sz.common_species)),
+                 n123 = length(sz.common_species),
+                 lwd = rep(1, 3),
+                 lty =rep("solid", 3), 
+                 col = rep("black", 3),
+                 cex= rep(2, 7),
+                 cat.pos = c(-40, 40, 180),
+                 cat.dist =c(0.08, 0.08, 0.04),
+                 fontface = rep("plain", 7),
+                 fontfamily = rep("sans", 7),
+                 cat.cex = rep(2, 3),
+                 cat.fontface = rep("plain", 3),
+                 cat.fontfamily = rep("sans", 3),
+                 category = c("BRUV", "Seine", "eDNA"),  
+                 fill = c(col_gbp1[2],col_zis1[3],col_moo3[1]),
+                 alpha = 0.8)
+
+grid.draw(sp.venn_plot)
+
+png(filename = here("Figures","S2.tiff"),
+       width=12,
+       height = 8,
+       res = 300,
+      units = c("in"))
+
+grid.draw(sp.venn_plot)
+
+dev.off()
+
+
+```
+
+
+#Site-Species
+## Figure S4: Co-detection of seine and BRUV Data
+
+```{r, fig.width=8, fig.height=12}
+
+three_compare %>% as_tibble() %>% 
+filter(., BRUV_presence > 0) %>%  dplyr::select(Species) %>%  unique() -> bruv_species_unique
+
+three_compare %>% as_tibble() %>% 
+filter(., seine_presence > 0) %>%  dplyr::select(Species) %>%  unique() -> seine_species_unique
+
+intersect(bruv_species_unique,seine_species_unique) -> bruv_seine_species_unique
+
+# Make Co-detection grid
+three_compare %>% 
+  as_tibble() %>% 
+  mutate(., matching = case_when(BRUV_presence == 1 & seine_presence== 1 ~"Both Detected",
+                                 BRUV_presence == 0 & seine_presence== 0 ~"Both Absent",
+                                 BRUV_presence == 0 & seine_presence== 1 ~"Seine Only",
+                                 BRUV_presence == 1 & seine_presence== 0 ~"BRUV Only",
+                                 TRUE ~"messed up")) %>%   filter(Species %in% bruv_seine_species_unique$Species)  -> matchingbruvseinesitespecies
+
+matchingbruvseinesitespecies %>% 
+ group_by(Species) %>% 
+  count(matching) %>% 
+  group_by(Species) %>% 
+  mutate(., sum(n)) %>% 
+  mutate(., perc = n/ `sum(n)`) -> matchingbruvseinesitespecies_perc
+
+matchingbruvseinesitespecies_perc %>% 
+  dplyr::select(Species, matching, perc) %>% 
+pivot_wider(., names_from=matching, values_from=perc, values_fill=0) -> bruvseine_wide
+
+bruvseine_wide %>% 
+  left_join(TAX) %>%
+  mutate( Class = if_else(is.na(Class), "Actinopteri",Class)) %>% arrange(Species) %>% arrange(Class)-> bruvseine_wide
+
+matchingbruvseinesitespecies$Species <- factor(matchingbruvseinesitespecies$Species, levels = bruvseine_wide$Species)
+
+a <- rev(ifelse(bruvseine_wide$Class == "Chondrichthyes", col_zis1[1] , "black"))
+
+matchingbruvseinesitespecies %>% 
+  as_tibble() %>% 
+  ggplot(., aes(x=Site, y=Species, fill=matching)) + 
+  ggtitle("Site-Species Co-Detection Map \nBRUV and eDNA Surf Zone Species") + 
+  geom_tile() + 
+  theme(title =element_text(size=22, face = "bold"),
+        axis.title =element_text(size=22, face = "bold"),
+        axis.text.x = element_text(angle = 60, size=20, hjust = 1, face = "bold"),
+        axis.text.y = element_text(size=20, hjust = 1, face = "bold.italic", color =a),
+        legend.text = element_text(size = 18, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1)
+                                   ) +
+  scale_fill_manual(name = "Detection Type", labels =c("Both Absent","Both Detected","BRUV Only","Seine Only"),values = c("white",col_dar1[4],col_gbp1[2],col_zis1[3])) +
+    scale_x_discrete(limits = c("Cuylers_Harbor",  "Sandy_Point", "Soledad", "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), labels = c("Cuyler Harbor",  "Sandy Point", "Soledad †", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica")) + 
+  scale_y_discrete(limits=rev) -> supplementalfigure4.6
+
+ 
+supplementalfigure4.6
+ggsave(plot= supplementalfigure4.6 , 
+       filename = here("Figures","S4.tiff"),
+       width=16,
+       height = 12,
+       dpi = 300,
+      units = c("in"))
+
+
+```
+
+## Figure S5: Co-detection of matching eDNA and Seine Data
+
+```{r, fig.width=8, fig.height=12}
+TAX = tax_table(physeq_obj.all_reads)
+TAX %>%  as.data.frame() %>% as_tibble() -> TAX
+
+TAX %>% add_row(Domain = "Eukaryota",   Phylum = "Chordata" ,Class  ="Actinopteri"  ,   Order ="" , Family  ="Embiotocidae" ,    Genus ="Surfperch",    Species="Surfperch") %>% 
+  add_row(Domain = "Eukaryota",   Phylum = "Chordata" ,Class  ="Actinopteri"  ,   Order ="Syngnathiformes" , Family  ="Syngnathidae" ,    Genus ="Syngnathus",    Species="Syngnathus sp.")-> TAX
+
+three_compare %>% as_tibble() %>% 
+filter(., seine_presence > 0) %>%  dplyr::select(Species) %>%  unique() -> seine_species_unique
+
+three_compare %>% as_tibble() %>% 
+filter(., eDNA_presence > 0) %>%  dplyr::select(Species) %>%  unique() -> eDNA_species_unique
+
+intersect(seine_species_unique,eDNA_species_unique) -> seine_edna_species_unique
+
+# Make Co-detection grid
+
+three_compare %>%  as_tibble() %>% 
+  mutate(., matching = case_when(seine_presence == 1 & eDNA_presence== 1 ~"Both Detected",
+                                 seine_presence == 0 & eDNA_presence== 0 ~"Both Absent",
+                                 seine_presence == 0 & eDNA_presence== 1 ~"eDNA Only",
+                                 seine_presence ==1 & eDNA_presence== 0 ~"Seine Only",
+                                 TRUE ~"messed up"))  %>%  filter(.,Species %in% seine_edna_species_unique$Species) -> matchingseinesitespecies
+
+
+matchingseinesitespecies %>% 
+ group_by(Species) %>% 
+  count(matching) %>% 
+  group_by(Species) %>% 
+  mutate(., sum(n)) %>% 
+  mutate(., perc = n/ `sum(n)`) -> matchingseinesitespecies_perc
+
+matchingseinesitespecies_perc %>% 
+  dplyr::select(Species, matching, perc) %>% 
+pivot_wider(., names_from=matching, values_from=perc, values_fill=0) -> seine_wide
+
+seine_wide %>% 
+  left_join(TAX) %>%
+  arrange(Class)  -> seine_wide
+
+matchingseinesitespecies$Species <- factor(matchingseinesitespecies$Species, levels = seine_wide$Species)
+
+a <- rev(ifelse(seine_wide$Class == "Chondrichthyes", col_zis1[1] , "black"))
+
+
+matchingseinesitespecies %>% 
+  as_tibble() %>% 
+  ungroup() %>% 
+  ggplot(., aes(x=Site, y=Species, fill=matching)) +
+  ggtitle("Site-Species Co-Detection Map \nSeine and eDNA Matching Species") + 
+  geom_tile() + 
+  theme(title =element_text(size=22, face = "bold"),
+        axis.title =element_text(size=22, face = "bold"),
+        axis.text.x = element_text(angle = 60, size=20, hjust = 1, face = "bold"),
+        axis.text.y = element_text(size=20, hjust = 1, face = "bold.italic", color=a),
+        legend.text = element_text(size = 18, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1)
+            )+
+  scale_fill_manual(name = "Detection Type", labels =c("Both Absent","Both Detected","eDNA Only","Seine Only"),values = c("white","#77B41B",col_moo3[1],col_zis1[3])) + 
+  scale_x_discrete(limits = c("Cuylers_Harbor",  "Sandy_Point", "Soledad", "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), labels = c("Cuyler Harbor",  "Sandy Point", "Soledad", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica")) + 
+  scale_y_discrete(limits=rev)-> supplementalfigure4.1
+
+supplementalfigure4.1
+
+ggsave(plot= supplementalfigure4.1 , 
+       filename = here("Figures","S5.tiff"),
+       width=16,
+       height = 12,
+       dpi = 300,
+      units = c("in"))
+
+
+
+matchingseinesitespecies_perc %>% 
+   dplyr::select(Species, matching, n) %>%
+   pivot_wider(., names_from=matching, values_from=n, values_fill=0) %>% 
+   mutate(., eDNA_count = `Both Detected` + `eDNA Only`,
+            Seine_count = `Seine Only`  +`Both Detected`) %>% 
+  dplyr::select(eDNA_count, Seine_count) %>% 
+      filter(., Species %in% matching_species$Species) %>% View()
+  filter(., eDNA_count > Seine_count & eDNA_count > BRUV_count) %>%  View()
+
+ 
+```
+## Figure S6: Co-detection of matching eDNA and BRUV Data
+
+```{r, fig.width=8, fig.height=12}
+
+three_compare %>% as_tibble() %>% 
+filter(., BRUV_presence > 0) %>%  dplyr::select(Species) %>%  unique() -> bruv_species_unique
+
+intersect(bruv_species_unique,eDNA_species_unique) -> bruv_edna_species_unique
+
+# Make Co-detection grid
+three_compare %>% 
+  as_tibble() %>% 
+  mutate(., matching = case_when(BRUV_presence == 1 & eDNA_presence== 1 ~"Both Detected",
+                                 BRUV_presence == 0 & eDNA_presence== 0 ~"Both Absent",
+                                 BRUV_presence == 0 & eDNA_presence== 1 ~"eDNA Only",
+                                 BRUV_presence == 1 & eDNA_presence== 0 ~"BRUV Only",
+                                 TRUE ~"messed up")) %>%   filter(Species %in% bruv_edna_species_unique$Species)  -> matchingbruvsitespecies
+
+matchingbruvsitespecies %>% 
+ group_by(Species) %>% 
+  count(matching) %>% 
+  group_by(Species) %>% 
+  mutate(., sum(n)) %>% 
+  mutate(., perc = n/ `sum(n)`) -> matchingbruvsitespecies_perc
+
+matchingbruvsitespecies_perc %>% 
+  dplyr::select(Species, matching, perc) %>% 
+pivot_wider(., names_from=matching, values_from=perc, values_fill=0) -> bruv_wide
+
+bruv_wide %>% 
+  left_join(TAX) %>%
+  arrange(Class)  -> bruv_wide
+
+matchingbruvsitespecies$Species <- factor(matchingbruvsitespecies$Species, levels = bruv_wide$Species)
+
+a <- rev(ifelse(bruv_wide$Class == "Chondrichthyes", col_zis1[1] , "black"))
+
+matchingbruvsitespecies %>% 
+  as_tibble() %>% 
+  ggplot(., aes(x=Site, y=Species, fill=matching)) + 
+  ggtitle("Site-Species Co-Detection Map \nBRUV and eDNA Matching Species") + 
+  geom_tile() + 
+  theme(title =element_text(size=22, face = "bold"),
+        axis.title =element_text(size=22, face = "bold"),
+        axis.text.x = element_text(angle = 60, size=20, hjust = 1, face = "bold"),
+        axis.text.y = element_text(size=20, hjust = 1, face = "bold.italic", color =a),
+        legend.text = element_text(size = 18, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1)
+                                   ) +
+  scale_fill_manual(name = "Detection Type", labels =c("Both Absent","Both Detected","BRUV Only","eDNA Only"),values = c("white","#B57EDC",col_gbp1[2],col_moo3[1])) +
+    scale_x_discrete(limits = c("Cuylers_Harbor",  "Sandy_Point", "Soledad", "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), labels = c("Cuyler Harbor",  "Sandy Point", "Soledad †", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica")) + 
+  scale_y_discrete(limits=rev) -> supplementalfigure4.2
+
+ 
+supplementalfigure4.2
+ggsave(plot= supplementalfigure4.2 , 
+       filename = here("Figures","S6.tiff"),
+       width=16,
+       height = 12,
+       dpi = 300,
+      units = c("in"))
+
+
+```
+
+
+## Figure S7: Co-detection of eDNA and visual Data
+
+
+```{r}
+
+
+#df for eDNA by Site
+phyloseq_to_df(physeq_obj.site_eindex_surf_combo) %>%
+  mutate(., Species = if_else(Genus =="Syngnathus","Syngnathus californiensis",Species)) %>% 
+  dplyr::select(.,-Domain,-OTU,-Phylum, -Class,-Order,-Family,-Genus) %>%
+  #remove ASVs without species level ID
+  filter(Species != "") %>%
+#convert to a long data frame
+  pivot_longer(.,names_to="Sample",values_to="e_index", cols=`Bechers`:`Water_Canyon`) %>%
+#rejoin the metadata
+  left_join(site_metadata, by=c("Sample"="Site")) -> e_index_long_surf_combo
+
+
+#merge Seine and BRUV methods
+seine_and_bruv <- merge(seine_compare, bruv_compare, by = c("Species", "Site"), all =TRUE)
+
+seine_and_bruv %>% 
+  dplyr::mutate(Seine_count = replace_na(Seine_count, 0),
+                Bruv_MaxN = replace_na(Bruv_MaxN, 0)) -> seine_and_bruv
+
+seine_and_bruv %>% 
+ mutate(., Embiotocidae = case_when(Species =="Amphistichus argenteus" ~"Surfperch",
+                                     Species =="Hyperprosopon ellipticum" ~"Surfperch",
+                                     Species =="Hyperprosopon argenteum" ~"Surfperch",
+                                     TRUE ~"Other Fish")) %>% 
+  mutate(., Species = if_else(Embiotocidae=="Surfperch","Surfperch",Species)) %>% 
+  dplyr::select(-Embiotocidae)-> seine_and_bruv_surf_combo
+
+#create column for eDNA method
+e_index_long_surf_combo %>% 
+  dplyr::select(Site = Sample, Species, e_index) -> e_index_compare_surf_combo
+
+#merge Seine, BRUV and eDNA
+merge(seine_and_bruv_surf_combo, e_index_compare_surf_combo, by = c("Species", "Site"), all =TRUE) %>% 
+  mutate(., Species = if_else(Species =="Syngnathus californiensis","Syngnathus sp.",Species))-> three_compare_surf_combo
+
+
+three_compare_surf_combo %>% 
+  dplyr::mutate(Seine_count = replace_na(Seine_count, 0),
+                Bruv_MaxN = replace_na(Bruv_MaxN, 0),
+                e_index = replace_na(e_index, 0)) -> three_compare_surf_combo
+
+three_compare_surf_combo %>% 
+  mutate(., Visual_presence = if_else(Seine_count+Bruv_MaxN > 0, 1, 0), 
+            eDNA_presence = if_else(e_index > 0, 1, 0),
+            BRUV_presence = if_else(Bruv_MaxN > 0, 1, 0),
+            seine_presence=  if_else(Seine_count > 0, 1, 0))-> three_compare_surf_combo
+```
+
+
+```{r, fig.width=8, fig.height=12}
+three_compare_surf_combo %>%  View()
+
+# Make Co-detection grid
+three_compare_surf_combo %>% 
+  as_tibble() %>% 
+  mutate(., matching = case_when(BRUV_presence == 1 & eDNA_presence == 1 & seine_presence== 1 ~"All Detected",
+                                 BRUV_presence == 0 & eDNA_presence== 0 & seine_presence== 0~"All Absent",
+                                 BRUV_presence == 1 & eDNA_presence== 0 & seine_presence== 0~"BRUV Only",
+                                 BRUV_presence == 1 & eDNA_presence== 1 & seine_presence== 0 ~"eDNA & BRUV",
+                                 BRUV_presence == 0 & eDNA_presence== 1 & seine_presence== 0~"eDNA Only",
+                                 BRUV_presence == 0 & eDNA_presence == 1 & seine_presence == 1~"eDNA & Seine",
+                                 BRUV_presence == 0 & eDNA_presence== 0 & seine_presence== 1 ~"Seine Only",
+                                 BRUV_presence == 1 & eDNA_presence== 0 & seine_presence== 1~"BRUV & Seine",
+                                 TRUE ~"messed up"))  %>% 
+  as_tibble() -> matchingvizsitespecies
+
+matchingvizsitespecies %>% 
+ group_by(Species) %>% 
+  count(matching) %>% 
+  group_by(Species) %>% 
+  mutate(., sum(n)) %>% 
+  mutate(., perc = n/ `sum(n)`) -> matchingvizsitespecies_perc
+
+matchingvizsitespecies_perc %>% 
+  dplyr::select(Species, matching, perc) %>% 
+pivot_wider(., names_from=matching, values_from=perc, values_fill=0) -> viz_wide
+
+viz_wide %>% 
+  mutate(., viz_sum = `Seine Only`+`BRUV Only`+`All Absent`,
+         eDNA_sum = `All Absent`+`eDNA Only`) %>% 
+  filter(., viz_sum !=1) %>% 
+  filter(., eDNA_sum != 1) -> matching_species
+
+ matchingvizsitespecies %>% 
+   filter(., Species %in% matching_species$Species) -> matchingvizsitespecies
+
+viz_wide %>% 
+  filter(., Species %in% matching_species$Species) %>% 
+  left_join(TAX) %>%
+  arrange(Class)  -> viz_wide
+
+matchingvizsitespecies$Species <- factor(matchingvizsitespecies$Species, levels = viz_wide$Species)
+
+a <- rev(ifelse(viz_wide$Class == "Chondrichthyes", col_zis1[1] , "black"))
+
+matchingvizsitespecies %>% 
+  ggplot(., aes(x=Site, y=Species, fill=matching)) + 
+  ggtitle("Site-Species Co-Detections \n All Visual and eDNA Detected Species")+
+  geom_tile() +
+  theme(title =element_text(size=22, face = "bold"),
+        axis.title =element_text(size=22, face = "bold"),
+        axis.text.x = element_text(angle = 60, size=20, hjust = 1, face = "bold"),
+        axis.text.y = element_text(size=20, hjust = 1, face = "bold.italic", colour=a),
+        legend.text = element_text(size = 18, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1) )+ 
+  scale_fill_manual(name = "Detection Type", 
+                    labels =c("All Absent","All Detected","BRUV Only","eDNA & BRUV", "eDNA & Seine","eDNA Only",  "Seine Only"),
+                    values = c("white",col_dar2[2],col_gbp1[2],"#B57EDC","#77B41B",col_moo3[1],col_zis1[3])) +
+  scale_x_discrete(limits = c("Cuylers_Harbor",  "Sandy_Point", "Soledad", "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), 
+                   labels = c("Cuyler Harbor",  "Sandy Point", "Soledad †", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica")) + 
+  scale_y_discrete(limits=rev)-> supplementalfigure7
+
+supplementalfigure7
+
+
+ggsave(plot= supplementalfigure7 , 
+       filename = here("Figures","S7.tiff"),
+       width=16,
+       height = 26,
+       dpi = 300,
+      units = c("in"))
+
+matchingvizsitespecies_perc %>% 
+   dplyr::select(Species, matching, n) %>%
+   pivot_wider(., names_from=matching, values_from=n, values_fill=0) %>% 
+   mutate(., eDNA_count = `All Detected` + `eDNA & BRUV` + `eDNA Only` +`eDNA & Seine`,
+            Seine_count = `Seine Only` +`All Detected`+`eDNA & Seine`,
+            BRUV_count = `BRUV Only` +`All Detected`+`eDNA & BRUV`) %>% 
+  dplyr::select(eDNA_count, Seine_count,BRUV_count) %>% 
+      filter(., Species %in% matching_species$Species) 
+  
+
+viz_wide %>% write.csv(here("codetected_table.csv"))
+
+matchingvizsitespecies$Species %>%  unique()
+```
+
+## Figure S8: Co-detection Map of All Species
+```{R}
+three_compare %>% 
+  as_tibble() %>% 
+  mutate(., matching = case_when(BRUV_presence == 1 & eDNA_presence == 1 & seine_presence== 1 ~"All Detected",
+                                 BRUV_presence == 0 & eDNA_presence== 0 & seine_presence== 0~"All Absent",
+                                 BRUV_presence == 1 & eDNA_presence== 0 & seine_presence== 0~"BRUV Only",
+                                 BRUV_presence == 1 & eDNA_presence== 1 & seine_presence== 0 ~"eDNA & BRUV",
+                                 BRUV_presence == 0 & eDNA_presence== 1 & seine_presence== 0~"eDNA Only",
+                                 BRUV_presence == 0 & eDNA_presence == 1 & seine_presence == 1~"eDNA & Seine",
+                                 BRUV_presence == 0 & eDNA_presence== 0 & seine_presence== 1 ~"Seine Only",
+                                 BRUV_presence == 1 & eDNA_presence== 0 & seine_presence== 1~"Visual Only",
+                                 TRUE ~"messed up"))  %>% 
+  as_tibble() -> allsitespecies
+
+
+allsitespecies %>% 
+ group_by(Species) %>% 
+  count(matching) %>% 
+  group_by(Species) %>% 
+  mutate(., sum(n)) %>% 
+  mutate(., perc = n/ `sum(n)`) -> allsitespecies_perc
+
+allsitespecies_perc %>% 
+  dplyr::select(Species, matching, perc) %>% 
+pivot_wider(., names_from=matching, values_from=perc, values_fill=0) -> all_wide
+
+
+all_wide %>% 
+  left_join(TAX) %>% 
+  mutate(., Class = case_when(Species == "Amphistichus argenteus" ~ "Actinopteri",
+           Species == "Amphistichus argenteus" ~ "Actinopteri",
+Species == "Atractoscion nobilis" ~ "Actinopteri",
+Species == "Hyperprosopon argenteum" ~ "Actinopteri",
+Species == "Hyperprosopon ellipticum" ~ "Actinopteri",
+Species == "Syngnathus californiensis" ~ "Actinopteri",
+Species == "Galeorhinus galeus" ~ "Chondrichthyes",
+TRUE ~ Class)) %>%   arrange(Class)-> all_wide
+all_wide %>%  write.csv(., file=here("all_wide.csv"))
+allsitespecies$Species <- factor(allsitespecies$Species, levels = all_wide$Species)
+
+a <- rev(ifelse(all_wide$Class == "Chondrichthyes", col_zis1[1] , "black"))
+
+allsitespecies %>% 
+  as_tibble() %>% 
+  ggplot(., aes(x=Site, y=Species, fill=matching)) + 
+  ggtitle("Site-Species Co-Detections \n All Detected Species")+
+  geom_tile() +
+  theme(title =element_text(size=22, face = "bold"),
+        axis.title =element_text(size=22, face = "bold"),
+        axis.text.x = element_text(angle = 60, size=20, hjust = 1, face = "bold"),
+        axis.text.y = element_text(size=20, hjust = 1, face = "bold.italic", color=a),
+        legend.text = element_text(size = 18, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1)
+                                   )+ 
+  scale_fill_manual(name = "Detection Type", 
+                    labels =c("All Absent","All Detected","BRUV Only","eDNA & BRUV", "eDNA & Seine","eDNA Only",  "Seine Only", "Visual Only"),
+                    values = c("white",col_dar2[2],col_gbp1[2],"#B57EDC","#77B41B",col_moo3[1],col_zis1[3],col_dar1[4])) +
+  scale_x_discrete(limits = c("Cuylers_Harbor",  "Sandy_Point", "Soledad", "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), 
+                   labels = c("Cuyler Harbor",  "Sandy Point", "Soledad †", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica")) + 
+  scale_y_discrete(limits=rev)-> supplementalfigure8
+
+supplementalfigure8
+
+ggsave(plot= supplementalfigure8 , 
+       filename = here("Figures","S8.tiff"),
+       width=16,
+       height = 26,
+       dpi = 300,
+      units = c("in"))
+      
+```
+
+## Figure 4: Co-detection of eDNA and visual surfzone species
+
+
+```{r, fig.width=8, fig.height=12}
+three_compare_surf_combo$Species %>%  unique() %>%  sort()
+
+# Make Co-detection grid
+three_compare_surf_combo %>% 
+  as_tibble() %>% 
+  mutate(., matching = case_when(BRUV_presence == 1 & eDNA_presence == 1 & seine_presence== 1 ~"All Detected",
+                                 BRUV_presence == 0 & eDNA_presence== 0 & seine_presence== 0~"All Absent",
+                                 BRUV_presence == 1 & eDNA_presence== 0 & seine_presence== 0~"BRUV Only",
+                                 BRUV_presence == 1 & eDNA_presence== 1 & seine_presence== 0 ~"eDNA & BRUV",
+                                 BRUV_presence == 0 & eDNA_presence== 1 & seine_presence== 0~"eDNA Only",
+                                 BRUV_presence == 0 & eDNA_presence == 1 & seine_presence == 1~"eDNA & Seine",
+                                 BRUV_presence == 0 & eDNA_presence== 0 & seine_presence== 1 ~"Seine Only",
+                                 BRUV_presence == 1 & eDNA_presence== 0 & seine_presence== 1~"BRUV & Seine",
+                                 TRUE ~"messed up"))  %>% 
+  as_tibble() -> matchingvizsitespecies
+
+matchingvizsitespecies$Species %>%  unique()
+
+matchingvizsitespecies %>% 
+ group_by(Species) %>% 
+  count(matching) %>% 
+  group_by(Species) %>% 
+  mutate(., sum(n)) %>% 
+  mutate(., perc = n/ `sum(n)`) -> matchingvizsitespecies_perc
+
+matchingvizsitespecies_perc$Species %>% unique()
+matchingvizsitespecies_perc %>% 
+  dplyr::select(Species, matching, perc) %>% 
+pivot_wider(., names_from=matching, values_from=perc, values_fill=0) -> viz_wide
+
+viz_wide$Species %>% unique()
+
+viz_wide %>% 
+  mutate(., viz_sum = `Seine Only`+`BRUV Only`+`All Absent`,
+         eDNA_sum = `All Absent`+`eDNA Only`) %>% 
+  filter(., viz_sum !=1) %>% 
+  filter(., eDNA_sum != 1) -> matching_species
+ 
+matching_species$Species
+
+matchingvizsitespecies %>% 
+ filter(., Species %in% matching_species$Species) %>%
+ filter(., Species %in% c(str_replace(surfzone_sp$Species,"_"," "),"Surfperch","Syngnathus sp.")) -> matchingvizsitespecies
+
+matchingvizsitespecies$Species %>%  unique()
+viz_wide %>% 
+  filter(., Species %in% matching_species$Species) %>% 
+  left_join(TAX) %>%
+  arrange(Class)  -> viz_wide
+
+viz_wide$Species %>%  unique()
+
+matchingvizsitespecies$Species <- factor(matchingvizsitespecies$Species, levels = viz_wide$Species)
+
+a <- rev(ifelse(viz_wide$Class == "Chondrichthyes", col_zis1[1] , "black"))
+
+matchingvizsitespecies  %>% 
+  as_tibble() %>% 
+  ggplot(., aes(x=Site, y=Species, fill=matching)) + 
+  ggtitle("Site-Species Co-Detections \n Visual and eDNA Detected Surf Zone Species")+
+  geom_tile() +
+  theme(title =element_text(size=22, face = "bold"),
+        axis.title =element_text(size=22, face = "bold"),
+        axis.text.x = element_text(angle = 60, size=20, hjust = 1, face = "bold"),
+        axis.text.y = element_text(size=20, hjust = 1, face = "bold.italic", color=a),
+        legend.text = element_text(size = 18, face = "bold"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        panel.border = element_rect(colour = "black", fill=NA, size=1)
+                                   )+ 
+  scale_fill_manual(name = "Detection Type", 
+                    labels =c("All Absent","All Detected","BRUV Only","eDNA & BRUV", "eDNA & Seine","eDNA Only",  "Seine Only", "Visual Only"),
+                    values = c("white",col_dar2[2],col_gbp1[2],"#B57EDC","#77B41B",col_moo3[1],col_zis1[3],col_dar1[4])) +
+  scale_x_discrete(limits = c("Cuylers_Harbor",  "Sandy_Point", "Soledad", "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), 
+                   labels = c("Cuyler Harbor",  "Sandy Point", "Soledad †", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica")) + 
+  scale_y_discrete(limits=rev)-> supplementalfigure4.5
+
+supplementalfigure4.5
+
+ggsave(plot= supplementalfigure4.5 , 
+       filename = here("Figures","Figure_4.tiff"),
+       width=16,
+       height = 26,
+       dpi = 300,
+      units = c("in"))
+
+```
+
+
+
+
+
+# Beta Diversity 
+
+### All Methods Phlyoseq Object
+
+#### Create site_presence_all_wide table
+
+```{r}
+three_compare %>% 
+  as_tibble() %>% 
+  dplyr::select(Site, Species, BRUV=BRUV_presence , eDNA=eDNA_presence, Seine=seine_presence) -> combined_PA
+
+combined_PA %>% 
+  pivot_longer(cols =`BRUV`:`Seine`, names_to = "Method", values_to = "Presence") %>% 
+  pivot_wider(names_from = c(Method, Site),  names_sep = "_", values_from = Presence, values_fill =0) -> wide_PA
+
+
+wide_PA %>% 
+  dplyr::select(-BRUV_Soledad,-eDNA_Soledad,-Seine_Soledad) -> wide_PA
+```
+
+#### Create site_metadata_all Table 
+
+```{r}
+#eDNA
+site_metadata %>% 
+  mutate(., eDNA = "eDNA") ->site_metadata_eDNA
+
+site_metadata_eDNA$SiteE<-paste(site_metadata_eDNA$eDNA,site_metadata_eDNA$Site,sep="_")
+site_metadata_eDNA %>% dplyr::select("SiteE", "Site", "Location", "Sample_date", "temp_2018", "avg_temp_total", "eDNA") %>% rename(MethodSite= SiteE) %>% rename(Method= eDNA) -> site_metadata_eDNA
+
+#BRUV
+site_metadata %>% mutate(., BRUV = "BRUV") ->site_metadata_BRUV
+site_metadata_BRUV$SiteB<-paste(site_metadata_BRUV$BRUV,site_metadata_BRUV$Site,sep="_")
+site_metadata_BRUV %>% dplyr::select("SiteB", "Site", "Location", "Sample_date", "temp_2018", "avg_temp_total", "BRUV") %>% rename(MethodSite= SiteB) %>% rename(Method= BRUV) -> site_metadata_BRUV
+
+#seine
+site_metadata %>% mutate(., seine = "Seine") ->site_metadata_seine
+site_metadata_seine$SiteS<-paste(site_metadata_seine$seine,site_metadata_seine$Site,sep="_")
+site_metadata_seine %>% dplyr::select("SiteS",  "Site","Location", "Sample_date", "temp_2018", "avg_temp_total", "seine") %>% rename(MethodSite= SiteS) %>% rename(Method= seine) -> site_metadata_seine
+
+rbind(site_metadata_seine,site_metadata_BRUV,site_metadata_eDNA) -> site_metadata_all_long
+
+site_metadata_all_long %>% 
+ filter(., !MethodSite %in% c("BRUV_Soledad","eDNA_Soledad","Seine_Soledad")) -> site_metadata_all_long
+
+```
+
+####Build All Method Phyloseq Object
+
+##### ASV Reads
+```{r}
+#Metadata
+site_metadata_all_long %>%  as.data.frame() -> sampledata
+rownames(sampledata) <- site_metadata_all_long$MethodSite
+sample_data(sampledata) -> sampledata
+
+#ASV Reads
+wide_PA %>% 
+  dplyr::select( Species)  %>%  as.matrix()-> taxonomy_table
+
+rownames(taxonomy_table) <- wide_PA$Species
+
+TAX = tax_table(taxonomy_table)
+wide_PA %>% 
+  dplyr::select(-Species) %>% as.matrix() -> otu_table
+rownames(otu_table) <- wide_PA$Species
+
+OTU = otu_table(otu_table, taxa_are_rows = TRUE)
+physeq_obj.site_presence_all = phyloseq(OTU, TAX, sampledata)
+```
+
+
+### PERMANOVA with All Species
+```{r}
+#Betadiversity
+#Generate Vegan formatted data table
+method.sampledf <- data.frame(sample_data(physeq_obj.site_presence_all))
+method.rel_abun<- vegan_otu(physeq_obj.site_presence_all)
+
+#Jaccard dissimilarity matrix
+method.d_carn <- vegdist(method.rel_abun, method="jaccard", binary=TRUE)
+
+#PERMANOVA: Method+Site
+method.adonis_results <- adonis2(method.rel_abun~Method+Site, data=method.sampledf)
+method.adonis_results
+#Method = 42.6%
+#Site = 28.3%
+#residuals =29.7%	
+
+#Homogeneity of Dispersions test... Site 
+betadisper(method.d_carn, getElement(method.sampledf, "Site"))
+anova(betadisper(method.d_carn, getElement(method.sampledf, "Site")))
+broom::tidy(TukeyHSD(betadisper(method.d_carn, getElement(method.sampledf, "Site")))) -> supplemental7.1
+write.csv(supplemental7.2, file="supplemental7.1.csv")
+
+broom::tidy(TukeyHSD(betadisper(method.d_carn, getElement(method.sampledf, "Site")))) %>% View() #0 significant (p<.005) # 0 are significant (p<.001) (0 total)
+
+#Homogeneity of Dispersions test... Methods
+betadisper(method.d_carn, getElement(method.sampledf, "Method"))
+anova(betadisper(method.d_carn, getElement(method.sampledf, "Method")))
+broom::tidy(TukeyHSD(betadisper(method.d_carn, getElement(method.sampledf, "Method")))) -> supplemental7.2
+
+write.csv(supplemental7.3, file="supplemental7.2.csv")
+
+broom::tidy(TukeyHSD(betadisper(method.d_carn, getElement(method.sampledf, "Method")))) %>% View() # 0 are significant (p<.005) # 0 are significant (p<.001) ( 0 total)
+`````
+
+### Ordinations with All Species
+
+#### Figure S3. NMDS
+
+```{r}
+#NMDS Ordination
+ord <- ordinate(physeq_obj.site_presence_all, method = "NMDS", distance = ("jaccard"), binary = TRUE)
+
+##Plot_Ordination
+plot_ordination(physeq_obj.site_presence_all, ord, "samples", color = "Method", shape="Site") +
+  ggtitle("NMDS Jaccard-Binary Dissimilarity Method") + 
+  geom_point(size = 4) + 
+  theme_bw()+ 
+  theme(plot.title = element_text(hjust = 0.5,size = 20, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5,size = 18, face = "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.text=element_text(size=16), 
+        axis.title=element_text(size=16,face="bold"),
+        legend.title = element_text( size=16, face="bold"),
+        legend.text = element_text(size=14)
+        ) + 
+  labs(shape = "Site", color = "Method") + 
+  scale_color_manual(name  ="Method",
+                     breaks=c("BRUV", "eDNA", "Seine"),
+                     labels=c("BRUV", "eDNA", "Seine"), 
+                     values = c(col_gbp1[2],col_moo3[1], col_zis1[3])) +  
+  stat_ellipse(geom = "path", type="norm", aes(group= Method),linetype = 2) + 
+  scale_shape_manual(name = "Site", 
+                     limits = c("Cuylers_Harbor",  "Sandy_Point",  "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), 
+                     labels = c("Cuyler Harbor",  "Sandy Point", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica"), 
+                     values=c(8, 14, 12, 0, 11, 9, 7, 5, 2, 4, 6, 1, 13, 10, 16, 15, 17, 18)) -> supplementalfigure6.1
+
+supplementalfigure6.1
+
+ggsave(plot= supplementalfigure6.1, 
+       filename = here("Figures","S3.tiff"),
+       width=16,
+       height = 8,
+       dpi = 300,
+      units = c("in"))
+```
+
+#### PCoA
+
+```{r}
+#PCoA Ordination
+ord.pca <- ordinate(physeq_obj.site_presence_all, method = "PCoA", distance = ("jaccard"), binary = TRUE)
+
+##Plot_Ordination
+plot_ordination(physeq_obj.site_presence_all, ord.pca, "samples", color = "Method", shape="Site",
+    title = "PCoA Jaccard-Binary Dissimilarity Method") + geom_point(size = 4) + theme_bw()+ theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank(), axis.text=element_text(size=16),
+        axis.title=element_text(size=16,face="bold"),legend.title = element_text( size=10, face="bold"),legend.text = element_text(size=8))+ labs(shape = "Site") +  stat_ellipse(geom = "path", type="norm", aes(group= Method),linetype = 2) + scale_shape_manual(values=c(0, 1, 5, 2, 6, 8, 16, 10, 7, 4, 13, 15, 14, 17, 18, 12, 9, 11)) ->supplementalfigure6.2
+
+supplementalfigure6.2
+
+```
+
+#### CAP Analysis for All Species
+
+```{r, results="hide",warning=FALSE}
+#Run CAP analysis to identify predictor species
+all.vare.cap <- capscale(method.rel_abun ~ Method + Site, data=method.sampledf, dist="jaccard", binary=TRUE)
+#Retain species scores
+sppscores(all.vare.cap) <- method.rel_abun
+as.data.frame(vegan::scores(all.vare.cap , display="species")) %>% 
+  rownames_to_column(var = "sample") %>% 
+  as.tibble %>%
+ mutate(dist = sqrt((CAP1 - 0)^2 + (CAP2 - 0)^2)) -> all.vare.cap_species_distances
+```
+##### Check For Break Point for Top Species
+```{r}
+all.species_distances <- as.data.frame(all.vare.cap_species_distances)
+rownames(all.species_distances) <- all.species_distances$sample
+# Now add the environmental variables as arrows
+all.arrowmat <- all.species_distances
+#Rename row names to clean up plot
+rownames(all.species_distances) %>% as.data.frame() -> all.namers
+
+rownames(all.arrowmat) <- all.namers$.
+# Add labels, make a data.frame
+all.arrowdf <- data.frame(labels = rownames(all.arrowmat), all.arrowmat)
+all.arrowdf %>% 
+arrange(desc(dist)) %>% 
+ggplot(., aes(x= reorder(labels, -dist), y=dist)) +
+  geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+## Figure 3. Create CAP Diagram
+```{r}
+all.vare.cap_species_distances %>% 
+  top_n(7, dist) -> all.top_species
+all.top_species <- data.frame(all.top_species)
+rownames(all.top_species) <- all.top_species$sample
+# Now add the environmental variables as arrows
+all.arrowmat <- all.top_species
+#Rename row names to clean up plot
+rownames(all.top_species) %>% as.data.frame() -> all.namers
+rownames(all.arrowmat) <- all.namers$.
+# Add labels, make a data.frame
+all.arrowdf <- data.frame(labels = rownames(all.arrowmat), all.arrowmat)
+# Define the arrow aesthetic mapping
+all.arrow_map <- aes(xend = .75 * CAP1, 
+                 yend = .75 * CAP2, 
+                 x = 0, 
+                 y = 0, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+all.label_map <- aes(x = 0.6 * CAP1, 
+                 y = 0.6 * CAP2, 
+                 shape = NULL, 
+                 color = NULL, 
+                 label = labels)
+all.arrowhead = arrow(length = unit(0.02, "npc"))
+#Hulls for each polygon
+all.test <- as.data.frame(all.vare.cap$CCA$wa)
+all.data.scores <- as.data.frame(scores(all.test))  
+#Using the scores function from vegan to extract the site scores and 
+# convert to a data.frame
+all.data.scores$Site <- method.sampledf$Site  
+# create a column of site names, from the rownames of data.scores
+#head(all.data.scores) 
+grp <- method.sampledf$Site
+all.data.scores$grp <- grp  #  add the grp variable created earlier
+#Add Method data
+grp <- method.sampledf$Method
+all.data.scores$grp <- grp  #  add the grp variable created earlier
+#### Calculate Shape Around Points
+all.grp.BRUV <- all.data.scores[all.data.scores$grp == "BRUV", ][chull(all.data.scores[all.data.scores$grp == "BRUV", c("CAP1", "CAP2")]), ]  
+all.grp.eDNA <- all.data.scores[all.data.scores$grp == "eDNA", ][chull(all.data.scores[all.data.scores$grp == "eDNA", c("CAP1", "CAP2")]), ]  
+all.grp.seine <- all.data.scores[all.data.scores$grp == "Seine", ][chull(all.data.scores[all.data.scores$grp == "Seine", c("CAP1", "CAP2")]), ]
+all.hull.data <- rbind(all.grp.BRUV, all.grp.eDNA, all.grp.seine)
+colnames(all.hull.data)[4] <- c("Method")
+
+# Plot CAP
+as.data.frame(all.vare.cap$CCA$wa) %>% 
+  rownames_to_column(var = "sample") %>% 
+  as.tibble() %>% 
+  left_join(method.sampledf, by=c("sample"="MethodSite")) -> all.data_cap
+
+
+all.cap_species <-  all.data_cap %>% 
+  ggplot(aes(x=CAP1, y=CAP2)) + geom_point(aes(col=Method, shape=Site), size =3) + scale_color_manual(values = c(col_gbp1[2],col_moo3[1], col_zis1[3]), labels=c("BRUV", "eDNA", "Seine")) + geom_segment(
+    mapping = all.arrow_map, 
+    size = .5, 
+    data = all.arrowdf, 
+    color = "grey", 
+    arrow = all.arrowhead
+  ) +
+  geom_text(
+    mapping = all.label_map, 
+    size = 5,  
+    data = all.arrowdf, 
+    show.legend = FALSE,
+    position=position_jitter(width=0.08,height=0.08)
+    ) + 
+  ggtitle("Constrained Analysis of Principal Components", subtitle = "All Detected Species") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_blank(),  panel.border = element_rect(colour = "black", fill=NA, size=2)) +
+  scale_shape_manual(name = "Site", limits = c("Cuylers_Harbor",  "Sandy_Point", "Soledad", "Bechers", "Water_Canyon", "Southeast_Anchorage", "Ford_Pt", "China_Camp", "Christy", "Forney", "Coches", "Ben_Weston", "Little_Harbor", "Emerald_Bay", "Dangermond", "R_Beach", "Santa_Claus", "Santa_Monica"), labels = c("Cuyler Harbor",  "Sandy Point", "Soledad †", "Bechers Bay", "Water Canyon", "Southeast Anchorage", "Ford Point", "China Camp", "Christy Beach", "Forney Cove", "Coches Prietos", "Ben Weston", "Little Harbor", "Emerald Bay", "Dangermond", "R-Beach", "Santa Claus", "Santa Monica"), values=c(8, 14, 12, 0, 11, 9, 7, 5, 2, 4, 6, 1, 13, 10, 16, 15, 17, 18), guide = 'none') +
+  geom_polygon(data=all.hull.data,aes(x=CAP1,y=CAP2,fill=grp, group=grp),alpha=0.30) + 
+  scale_fill_manual(name  ="Method",
+                            breaks=c("BRUV", "eDNA", "Seine"),
+                            labels=c("BRUV", "eDNA", "Seine"), 
+                        values = c(col_gbp1[2],col_moo3[1], col_zis1[3])) +
+  xlab("CAP2 (22.1%)") + ylab("CAP1 (11.4%)") +
+  theme(plot.title = element_text(hjust = 0.5,size = 20, face = "bold"),
+        axis.text=element_text(size=14),
+        axis.title=element_text(size=16,face="bold"),
+        legend.title=element_text(size=14),
+        legend.text=element_text(size=12),
+        plot.subtitle = element_text(size=18, hjust = 0.5),
+        legend.spacing.y = unit(0.2, 'cm'), 
+        legend.key = element_rect(size = 10),
+        legend.key.size = unit(2, 'lines')) ->supplementalfigure7
+
+supplementalfigure7
+
+ggsave(plot= supplementalfigure7, 
+       filename = here("Figures","Figure_3.tiff"),
+       width=14,
+       height = 8,
+       dpi = 300,
+      units = c("in"))
+```
+
+#### Determine CAP %
+```{r}
+#Constrained Analysis of Principle Components
+all.cap_ord <- ordinate(
+  physeq = physeq_obj.site_presence_all,
+  method = "CAP",
+  distance = method.d_carn,
+  formula = ~ Method+Site
+)
+#Results of model
+anova(all.cap_ord)
+all.cap_plot <- plot_ordination(
+  physeq = physeq_obj.site_presence_all,
+  ordination = all.cap_ord,
+  color = "Method",
+  axes = c(1,2)) +
+  aes(shape = Site)  +
+  scale_color_manual(values = c(col_meth)) + scale_shape_manual(values=c(0, 1, 5, 2, 6, 8, 16, 10, 7, 4, 13, 15, 14, 17, 18, 12, 9, 11))
+all.cap_plot
+#Percentages:
+#CAP1 - 22.1%
+#CAP2 - 11.4%
+  
+```
+#### Filter only Surf Zone Species detected by Visual Methods and eDNA
+
+#Filter only  Zone Species detected by Visual Methods and eDNA
+```{r}
+#Filter by species detected by both methods 
+subset_taxa(physeq_obj.site_presence_all, Species %in% matching_species$Species) -> physeq_obj.site_presence_matching
+
+
+ physeq_obj.site_presence_matching = prune_samples(sample_sums(physeq_obj.site_presence_matching)>0, physeq_obj.site_presence_matching)
+```
+
+```{r}
+
+#Filter by species detected by both methods 
+subset_taxa(physeq_obj.site_presence_matching, Species %in% surfzonesp) -> physeq_obj.site_presence_sz.match
+
+
+ physeq_obj.site_presence_sz.match = prune_samples(sample_sums(physeq_obj.site_presence_sz.match)>0, physeq_obj.site_presence_sz.match)
+```
+
+#### PERMANOVA with Species detected by Visual Methods and eDNA
+```{r}
+#Betadiversity
+#Generate Vegan formatted data table
+mmethod.sampledf <- data.frame(sample_data(physeq_obj.site_presence_sz.match))
+mmethod.rel_abun<- vegan_otu(physeq_obj.site_presence_sz.match)
+#Jaccard dissimilarity matrix
+mmethod.d_carn <- vegdist(mmethod.rel_abun, method="jaccard", binary=TRUE)
+#mmethod.d_carn
+
+#PERMANOVA: Method+Site
+m.method.adonis_results <- adonis2(mmethod.rel_abun~Method+Site, data=mmethod.sampledf)
+m.method.adonis_results
+#Method = 32.2%
+#Site = 36.8 %
+#residuals = 30.3%	
+
+
+#Homogeneity of Dispersions test... Site 
+betadisper(mmethod.d_carn, getElement(mmethod.sampledf, "Site")) %>% anova()
+broom::tidy(TukeyHSD(betadisper(mmethod.d_carn, getElement(mmethod.sampledf, "Site"))))
+broom::tidy(TukeyHSD(betadisper(mmethod.d_carn, getElement(mmethod.sampledf, "Site")))) %>% View() #0 are significant (p<.005) # 0 are significant (p<.001) (0 total)
+
+#Homogeneity of Dispersions test... Methods
+betadisper(mmethod.d_carn, getElement(mmethod.sampledf, "Method")) %>% anova()
+broom::tidy(TukeyHSD(betadisper(mmethod.d_carn, getElement(mmethod.sampledf, "Method"))))
+broom::tidy(TukeyHSD(betadisper(mmethod.d_carn, getElement(mmethod.sampledf, "Method")))) %>% View() # seine is signficantly more variable
+```
+# Sensitivity and Specificity
+
+```{r}
+scale_override <- function(which, scale) {
+  if(!is.numeric(which) || (length(which) != 1) || (which %% 1 != 0)) {
+    stop("which must be an integer of length 1")
+  }
+  
+  if(is.null(scale$aesthetics) || !any(c("x", "y") %in% scale$aesthetics)) {
+    stop("scale must be an x or y position scale")
+  }
+  
+  structure(list(which = which, scale = scale), class = "scale_override")
+}
+
+CustomFacetWrap <- ggproto(
+  "CustomFacetWrap", FacetWrap,
+  init_scales = function(self, layout, x_scale = NULL, y_scale = NULL, params) {
+    # make the initial x, y scales list
+    scales <- ggproto_parent(FacetWrap, self)$init_scales(layout, x_scale, y_scale, params)
+    
+    if(is.null(params$scale_overrides)) return(scales)
+    
+    max_scale_x <- length(scales$x)
+    max_scale_y <- length(scales$y)
+    
+    # ... do some modification of the scales$x and scales$y here based on params$scale_overrides
+    for(scale_override in params$scale_overrides) {
+      which <- scale_override$which
+      scale <- scale_override$scale
+      
+      if("x" %in% scale$aesthetics) {
+        if(!is.null(scales$x)) {
+          if(which < 0 || which > max_scale_x) stop("Invalid index of x scale: ", which)
+          scales$x[[which]] <- scale$clone()
+        }
+      } else if("y" %in% scale$aesthetics) {
+        if(!is.null(scales$y)) {
+          if(which < 0 || which > max_scale_y) stop("Invalid index of y scale: ", which)
+          scales$y[[which]] <- scale$clone()
+        }
+      } else {
+        stop("Invalid scale")
+      }
+    }
+    
+    # return scales
+    scales
+  }
+)
+
+facet_wrap_custom <- function(..., scale_overrides = NULL) {
+  # take advantage of the sanitizing that happens in facet_wrap
+  facet_super <- facet_wrap(...)
+  
+  # sanitize scale overrides
+  if(inherits(scale_overrides, "scale_override")) {
+    scale_overrides <- list(scale_overrides)
+  } else if(!is.list(scale_overrides) || 
+            !all(vapply(scale_overrides, inherits, "scale_override", FUN.VALUE = logical(1)))) {
+    stop("scale_overrides must be a scale_override object or a list of scale_override objects")
+  }
+  
+  facet_super$params$scale_overrides <- scale_overrides
+  
+  ggproto(NULL, CustomFacetWrap,
+    shrink = facet_super$shrink,
+    params = facet_super$params
+  )
+}
+
+```
+
+## Figure 5
+```{r}
+
+eDNA_sensitivity <- readRDS(file=here("eDNA_sensitivity.rds"))
+seine_sensitivity <- readRDS(file=here("seine_sensitivity.rds"))
+bruv_sensitivity <- readRDS(file=here("bruv_sensitivity.rds"))
+
+seine_occupancy <- readRDS(file=here("seine_occupancy.rds"))
+bruv_occupancy <- readRDS( file=here("bruv_occupancy.rds"))
+eDNA_occupancy <- readRDS( file=here("eDNA_occupancy.rds"))
+
+seine_sensitivity %>% 
+  mutate(., Method ="Seine") -> seine_sensitivity
+bruv_sensitivity %>% 
+  mutate(., Method ="BRUV") -> bruv_sensitivity
+eDNA_sensitivity %>% 
+  mutate(., Method ="eDNA") -> eDNA_sensitivity
+
+seine_occupancy %>% 
+  mutate(., Method ="Seine") -> seine_occupancy
+bruv_occupancy %>% 
+  mutate(., Method ="BRUV") -> bruv_occupancy
+eDNA_occupancy %>% 
+  mutate(., Method ="eDNA") -> eDNA_occupancy
+
+rbind(seine_occupancy,bruv_occupancy, eDNA_occupancy) -> occupancy_combo 
+
+
+rbind(seine_sensitivity,bruv_sensitivity, eDNA_sensitivity) %>% 
+  dplyr::select(Species, Method,Sensitivity, Specificity, TPR, FPR, FNR ,TNR) -> confusion_matrix
+
+confusion_matrix %>% 
+  left_join(occupancy_combo) ->confusion_matrix
+
+confusion_matrix %>% 
+  group_by(Method) %>% 
+  dplyr::summarise(mean(Sensitivity), mean(Specificity), mean(mean_occupancy))
+
+sens_aov <- aov(Sensitivity~Method, data=confusion_matrix)
+summary(sens_aov)
+TukeyHSD(sens_aov)  
+
+spec_aov <- aov(Specificity~Method, data=confusion_matrix)
+summary(spec_aov)
+TukeyHSD(spec_aov)  
+
+occ_aov <- aov(mean_occupancy~Method, data=confusion_matrix)
+summary(occ_aov)
+TukeyHSD(occ_aov)  
+
+confusion_matrix %>% 
+  dplyr::select(Species, Method,Sensitivity, Specificity, `Probability of Occupancy`=mean_occupancy) %>% 
+  pivot_longer(., cols=`Sensitivity`:`Probability of Occupancy`, values_to="Value", names_to="Metric") %>% 
+  ggplot(., aes(x=Method, y= Value, color = Method, fill=Method)) + #facet_wrap(.~Metric, scales = "free") + 
+  geom_boxplot(alpha=0.5) +
+  theme_bw()+
+   theme(title =element_text(size=22, face = "bold"),
+        axis.title =element_text(size=22, face = "bold"),
+        axis.text.x = element_text(angle = 0, size=20),
+        axis.text.y = element_text(size=20),
+        axis.title.y = element_blank(),
+        legend.text = element_text(size = 18, face = "bold"),
+        strip.text.x = element_text(size=20),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        legend.position = "none") +
+        scale_fill_manual(values=c(col_gbp1[2],col_moo3[1],col_zis1[3])) +      scale_color_manual(values=c(col_gbp1[2],col_moo3[1],col_zis1[3]))+
+  facet_wrap_custom(~Metric, scales = "free", ncol = 3, scale_overrides = list(
+    scale_override(1, scale_y_continuous(breaks = c(0, 0.3,0.6,0.9),labels = scales::percent_format(accuracy = 1))),
+    scale_override(2, scale_y_continuous(breaks = c(.93,.95, .97,.99),labels = scales::percent_format(accuracy = 1))),
+    scale_override(3, scale_y_continuous(breaks = c(.6, .7,.8,.9),labels = scales::percent_format(accuracy = 1)))
+  ))   -> sens_spec_fig
+
+sens_spec_fig 
+
+ggsave(plot= sens_spec_fig, 
+       filename = here("Figures","Figure_5.tiff"),
+       width=16,
+       height = 8,
+       dpi = 400,
+      units = c("in"))
+
+```
+
+
+
+### Figure S9
+```{r}
+
+#Select surfzone species only
+habitats %>% as_tibble() %>% 
+  mutate(., Species = recode(Species, 
+                             `Xenistius_californiensis`="Brachygenys_californiensis",
+                            `Urolophus_halleri`= "Urobatis_halleri",
+                            `Oxyjulis_californica`="Halichoeres_californica" ,
+                            `Semicossyphus_pulcher`="Bodianus_pulcher"))  -> habitats_2
+
+
+confusion_matrix %>% 
+  mutate(.,Species = str_replace_all(Species, " ","_") ) %>% 
+left_join(habitats_2) %>% 
+  filter(., Method == "eDNA") %>% 
+  dplyr::select(Species,mean_occupancy,sd_occupancy, surf_zone, intertidal_surfzone_nearshore_offshore,sandybottom_rockyreef_pelagic) %>% 
+  ggplot(., aes(x=surf_zone, y= mean_occupancy, color = surf_zone, fill=surf_zone))  + geom_boxplot(alpha=0.5) +
+  theme_bw()+
+   theme(title =element_text(size=22, face = "bold"),
+        axis.title =element_text(size=22, face = "bold"),
+        axis.text.x = element_text(angle = 0, size=20),
+        axis.text.y = element_text(size=20),
+        axis.title.y = element_text(size=20),
+        legend.text = element_text(size = 18, face = "bold"),
+        strip.text.x = element_text(size=20),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        legend.position = "none") +  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) + ylab("Probability of Occurance") + xlab("Inhabits Surf Zone") -> surfzone_fig
+
+surfzone_fig
+
+ggsave(plot= surfzone_fig, 
+       filename = here("Figures","S9.tiff"),
+       width=16,
+       height = 8,
+       dpi = 400,
+      units = c("in"))
+
+
+confusion_matrix %>% 
+  mutate(.,Species = str_replace_all(Species, " ","_") ) %>% 
+left_join(habitats_2) %>% 
+  filter(., Method == "eDNA") -> eDNA_habitat_data
+
+eDNA_habitat_data %>% 
+  group_by(surf_zone) %>% 
+  dplyr::summarise(mean(mean_occupancy))
+
+sens_aov_eDNA <- aov(mean_occupancy~surf_zone, data=eDNA_habitat_data)
+summary(sens_aov_eDNA)
+TukeyHSD(sens_aov_eDNA)  
+
+```
+
+# iNext Rarefaction Curves
+
+
+#### All Species Rarefaction Curve - Site Level
+
+
+```{r}
+
+method.sampledf <- data.frame(sample_data(physeq_obj.site_presence_all))
+method.rel_abun<- vegan_otu(physeq_obj.site_presence_all)
+
+#isolate groups
+eDNA_phy <- subset_samples(physeq_obj.site_presence_all, Method=="eDNA")
+BRUV_phy <- subset_samples(physeq_obj.site_presence_all, Method=="BRUV")
+Seine_phy <- subset_samples(physeq_obj.site_presence_all, Method=="Seine")
+
+
+#Convert groups into vegan outputs
+veganComm_eDNA <- vegan_otu(eDNA_phy)
+veganComm_BRUV <- vegan_otu(BRUV_phy)
+veganComm_seine <- vegan_otu(Seine_phy)
+
+###### iNEXT Species Accumulation Curves
+
+#Create List for iNEXT Species Incidence Frequencies
+mor_inc <-list ("eDNA" =t(veganComm_eDNA),
+                "BRUV"=t(veganComm_BRUV),
+                "Seine"=t(veganComm_seine))
+
+species_incidence <-lapply(mor_inc, as.incfreq)
+
+#Convert to iNEXT format
+t <- seq(1, 30, by=1)
+out.inc2 <- iNEXT(species_incidence, q=0, datatype="incidence_freq", size=t)
+
+out.inc2$DataInfo
+```
+
+
+
+## Figure 6 Comparison of species richness
+
+
+```{r}
+ggiNEXT(out.inc2, type=2, color.var="Assemblage") + 
+  theme_bw(base_size = 18) + scale_fill_manual(values=c(col_gbp1[2],col_moo3[1],col_zis1[3])) +  scale_color_manual(values=c(col_gbp1[2],col_moo3[1],col_zis1[3])) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                                                    panel.background = element_blank()) + xlab("Sites") + scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme(plot.title = element_text(hjust = 0.5,size = 30, face = "bold"),
+        axis.text=element_text(size=16),
+        axis.title=element_text(size=22,face="bold"),
+        legend.title=element_text(size=16),
+        legend.text=element_text(size=16),
+        plot.subtitle = element_text(size=18),
+        legend.spacing.y = unit(0.5, 'cm'), 
+        legend.key = element_rect(size = 10),
+        legend.key.size = unit(2, 'lines'))+ guides(fill=guide_legend(title="Method"), color=guide_legend(title="Method"), shape = guide_legend(title="Method"))-> sample_coverage_fig
+
+                                                    sample_coverage_fig
+
+ggsave(plot= sample_coverage_fig, 
+       filename = here("Figures","Figure_6.tiff"),
+       width=16,
+       height = 8,
+       dpi = 300,
+      units = c("in"))
+
+
+```
+
+```{r}
+#Convert to iNEXT format
+t <- seq(1, 100, by=1)
+out.inc_print <- iNEXT(species_incidence, q=0, datatype="incidence_freq", size=t)
+
+out.inc_print$iNextEst$size_based %>%  write.csv(., file=here("S10_iNext_model_stats.csv"))
+
+```
+
+```{r}
+ggiNEXT(out.inc_print, type=1, color.var="Assemblage") + 
+  theme_bw(base_size = 18) + scale_fill_manual(values=c(col_gbp1[2],col_moo3[1],col_zis1[3])) +  scale_color_manual(values=c(col_gbp1[2],col_moo3[1],col_zis1[3])) + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+                                                                                                    panel.background = element_blank()) + xlab("Sites") + scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  theme(plot.title = element_text(hjust = 0.5,size = 30, face = "bold"),
+        axis.text=element_text(size=16),
+        axis.title=element_text(size=22,face="bold"),
+        legend.title=element_text(size=16),
+        legend.text=element_text(size=16),
+        plot.subtitle = element_text(size=18),
+        legend.spacing.y = unit(0.5, 'cm'), 
+        legend.key = element_rect(size = 10),
+        legend.key.size = unit(2, 'lines'))+ guides(fill=guide_legend(title="Method"), color=guide_legend(title="Method"), shape = guide_legend(title="Method"))
+                                                    
+```
+
+
+
+
+#Relative Abundance
+
+```{r}
+#Create multiplot function
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  library(grid)
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+  numPlots = length(plots)
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                     ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+  if (numPlots==1) {
+    print(plots[[1]])
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+## Figure S10 Relative Abundance Seine vs. BRUV
+```{r}
+
+seine %>%
+  mutate(., Species = str_replace(Species, "_", " ")) %>% 
+  group_by(Site,Haul_number, Species) %>%
+  dplyr::summarise(Count = sum(Count)) %>% 
+  group_by(Site, Species) %>% 
+  dplyr::summarise(mean_Seine_count = mean(Count), sd_Seine_count = sd(Count)) %>% 
+  dplyr::select(Site, Species, mean_Seine_count,sd_Seine_count)-> seine_abund2
+
+
+bruv %>%
+  mutate(., Species = str_replace(Species, "_", " ")) %>% 
+  group_by(Site,BRUV_Number, Species) %>%
+  dplyr::summarise(MaxN = sum(MaxN)) %>% 
+  group_by(Site, Species) %>% 
+  dplyr::summarise(mean_bruv_MaxN = mean(MaxN), sd_bruv_MaxN = sd(MaxN)) %>% 
+  dplyr::select(Site, Species, mean_bruv_MaxN,sd_bruv_MaxN)-> bruv_abund2
+
+
+
+merge(seine_abund2,bruv_abund2, by = c("Site","Species"), all =TRUE) %>% 
+  as_tibble() %>% 
+  mutate(., mean_Seine_count = replace_na(mean_Seine_count, 0),
+         mean_bruv_MaxN = replace_na(mean_bruv_MaxN,0)) -> seine_bruv_comp
+
+seine_bruv_comp %>% 
+  mutate(., site_detection = case_when(mean_Seine_count > 0 & mean_bruv_MaxN > 0 ~"Site Detection",
+         TRUE ~"Other")) %>% 
+  group_by(Species) %>% 
+  dplyr::count(site_detection) %>% 
+  filter(., site_detection =="Site Detection") %>% 
+  filter(., n > 2) -> species_to_plot_bruv_seine
+ 
+#Graph Multiplot
+   seine_bruv_comp %>%
+       filter(., Species %in% species_to_plot_bruv_seine$Species) %>% 
+    dplyr::group_by(Species) %>% 
+    nest() %>% 
+    mutate(plot = map2(data,Species, ~ggplot(.x, aes(y= mean_bruv_MaxN , x = mean_Seine_count)) +   geom_smooth(method = "lm", col = c(col_dar1[4]), fill = c(col_dar1[4])) + stat_poly_eq(formula = my.formula,                                                                                                        aes(label = paste0("atop(", ..eq.label.., ",", ..rr.label.. , ")")),
+                                                                                                                                size = 2.5, label.x.npc = "right" ,rr.digits = 2,coef.digits = 2,p.digits=2, label.y.npc = 0.9,
+                                                                                                                                 parse = TRUE) +
+   stat_poly_eq(formula = my.formula,                                                                                                        aes(label = paste0(..p.value.label..)), size = 2.5, label.x.npc = 0.84 ,rr.digits = 2,coef.digits = 2,p.digits=2, label.y.npc = 0.78,
+                                                                                                                                 parse = TRUE) +
+                         
+                         
+                         geom_errorbarh(aes(xmin = mean_Seine_count-sd_Seine_count,
+                                           xmax = mean_Seine_count+sd_Seine_count)) + 
+                         geom_errorbar(aes(ymin = mean_bruv_MaxN-sd_bruv_MaxN,
+                                            ymax = mean_bruv_MaxN+sd_bruv_MaxN)) +
+                         theme_bw()+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank()) +
+                         geom_point() + theme(plot.title = element_text(size = 14, face = 4),text = element_text(size=14)) +
+                         #geom_errorbarh(aes(xmin = xmin, xmax = xmax),height = .001)
+                         ylab("BRUV Counts") + xlab("Seine Counts") +
+                         ggtitle(as.character(.y))))-> seine_bruv_plots
+  
+#Examine Plots
+multiplot(seine_bruv_plots$plot[[1]], #R2=0.03, p=0.55 A. argenteus !!
+            seine_bruv_plots$plot[[2]],  #R2=0.31, p=0.03 C. stigmaeus !!!
+            seine_bruv_plots$plot[[3]], #R2=0.02, p=0.66 G. nigricans
+            cols = 3) 
+
+
+png( filename = here("Figures","S10.tiff"),
+       width=16,
+       height = 8,
+       res = 300,
+      units = c("in"))
+
+multiplot(seine_bruv_plots$plot[[1]], #R2=0.03, p=0.55 A. argenteus !!
+            seine_bruv_plots$plot[[2]],  #R2=0.31, p=0.03 C. stigmaeus !!!
+            seine_bruv_plots$plot[[3]], #R2=0.02, p=0.66 G. nigricans
+            cols = 3) 
+dev.off()
+```
+
+## Figure S11 Relative Abundance eDNA vs. Seine
+```{r}
+seine$Species %>%  unique() %>%  sort()
+seine %>%
+  mutate(., Species = str_replace(Species, "_", " ")) %>% 
+  mutate(., Embiotocidae = case_when(Species =="Amphistichus argenteus" ~"Surfperch",
+                                     Species =="Hyperprosopon ellipticum" ~"Surfperch",
+                                     Species =="Hyperprosopon argenteum" ~"Surfperch",
+                                     TRUE ~"Other Fish")) %>% 
+  mutate(., Species = if_else(Embiotocidae=="Surfperch","Surfperch",Species)) %>% 
+  group_by(Site,Haul_number, Species) %>%
+  dplyr::summarise(Count = sum(Count)) %>% 
+  group_by(Site, Species) %>% 
+  dplyr::summarise(mean_Seine_count = mean(Count), sd_Seine_count = sd(Count)) %>% 
+  dplyr::select(Site, Species, mean_Seine_count,sd_Seine_count)-> seine_abund
+
+e_index_all_long_surf_combo %>%  
+  group_by(Site, Species) %>% 
+  dplyr::summarise(mean_e_index = mean(e_index), sd_e_index = sd(e_index)) %>% 
+  dplyr::select(Site, Species, mean_e_index,sd_e_index)-> eDNA_abund
+
+
+merge(eDNA_abund,seine_abund, by = c("Site","Species"), all =TRUE) %>% 
+  as_tibble() %>% 
+  mutate(., mean_e_index = replace_na(mean_e_index, 0),
+         mean_Seine_count = replace_na(mean_Seine_count,0)) -> eDNA_seine_comp
+
+eDNA_seine_comp %>% 
+  mutate(., site_detection = case_when(mean_e_index > 0 & mean_Seine_count > 0 ~"Site Detection",
+         TRUE ~"Other")) %>% 
+  group_by(Species) %>% 
+  dplyr::count(site_detection) %>% 
+  filter(., site_detection =="Site Detection") %>% 
+  filter(., n > 2) -> species_to_plot_seine
+
+my.formula <- y ~ x
+#Graph Multiplot
+eDNA_seine_comp %>%
+  filter(., Species %in% species_to_plot_seine$Species) %>% 
+  dplyr::group_by(Species) %>% 
+  nest() %>% 
+  mutate(plot = map2(data,Species, ~ggplot(.x, aes(x= mean_Seine_count , y = mean_e_index)) +   geom_smooth(method = "lm", col = c("#77B41B"), fill = c("#77B41B")) + stat_poly_eq(formula = my.formula,                                                                                                        aes(label = paste0("atop(", ..eq.label.., ",", ..rr.label.. , ")")),
+                                                                                                                                size = 2.5, label.x.npc = "right" ,rr.digits = 2,coef.digits = 2,p.digits=2, label.y.npc = 0.9,
+                                                                                                                                 parse = TRUE) +
+   stat_poly_eq(formula = my.formula,                                                                                                        aes(label = paste0(..p.value.label..)), size = 2.5, label.x.npc = 0.92 ,rr.digits = 2,coef.digits = 2,p.digits=2, label.y.npc = 0.78,
+                                                                                                                                 parse = TRUE)  +
+                       geom_errorbar(aes(ymin = mean_e_index-sd_e_index,
+                                         ymax = mean_e_index+sd_e_index)) + 
+                       geom_errorbarh(aes(xmin = mean_Seine_count-sd_Seine_count,
+                                          xmax = mean_Seine_count+sd_Seine_count)) +
+                       theme_bw()+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank()) + 
+                       geom_point() + theme(plot.title = element_text(size = 14, face = 4), text = element_text(size=14)) +
+                       #geom_errorbarh(aes(xmin = xmin, xmax = xmax),height = .001)
+                       xlab("Seine Counts per Haul") + ylab("eDNA Index") +
+                       ggtitle(as.character(.y))))-> seine_plots
+
+#Examine Plots
+multiplot(seine_plots$plot[[1]], #R2=0.32, p=0.0143 A. affinis !!!
+          seine_plots$plot[[2]], #R2=0.065, p=0.31 E. mordax
+          seine_plots$plot[[3]], #R2=0.0002, p=0.85 L. tenuis
+          seine_plots$plot[[4]], #R2=0.82, p<0.001 M. undulatus !!!!
+          seine_plots$plot[[5]], #R2=0.04, p<0.442 Surfperch 
+          seine_plots$plot[[6]], 
+          seine_plots$plot[[7]],#R2=0.04, p<0.42 T. semifasciata
+          seine_plots$plot[[8]], #R2=0.001, p<0.897 U roncador 
+         cols=4) 
+
+
+png( filename = here("Figures","S11.tiff"),
+       width=16,
+       height = 8,
+       res = 300,
+      units = c("in"))
+multiplot(seine_plots$plot[[1]], #R2=0.32, p=0.0143 A. affinis !!!
+          seine_plots$plot[[2]], #R2=0.065, p=0.31 E. mordax
+          seine_plots$plot[[3]], #R2=0.0002, p=0.85 L. tenuis
+          seine_plots$plot[[4]], #R2=0.82, p<0.001 M. undulatus !!!!
+          seine_plots$plot[[5]], #R2=0.04, p<0.442 M. minimus !!!!! 
+           seine_plots$plot[[6]], #R2=0.05, p<0.35 M. minimus !!!!! 
+          seine_plots$plot[[7]],
+          seine_plots$plot[[8]],#R2=0.04, p<0.42 T. semifasciata
+           #R2=0.001, p<0.897 U roncador 
+         cols=4) 
+dev.off()
+```
+## Figure S12 Relative Abundance eDNA vs. BRUV
+```{r}
+
+bruv %>%
+  mutate(., Species = str_replace(Species, "_", " ")) %>% 
+  mutate(., Embiotocidae = case_when(Species =="Amphistichus argenteus" ~"Surfperch",
+                                     Species =="Hyperprosopon ellipticum" ~"Surfperch",
+                                     Species =="Hyperprosopon argenteum" ~"Surfperch",
+                                     TRUE ~"Other Fish")) %>% 
+  mutate(., Species = if_else(Embiotocidae=="Surfperch","Surfperch",Species)) %>% 
+  group_by(Site,BRUV_Number, Species) %>%
+  dplyr::summarise(MaxN = sum(MaxN)) %>% 
+  group_by(Site, Species) %>% 
+  dplyr::summarise(mean_bruv_MaxN = mean(MaxN), sd_bruv_MaxN = sd(MaxN)) %>% 
+  dplyr::select(Site, Species, mean_bruv_MaxN,sd_bruv_MaxN)-> bruv_abund
+
+
+merge(eDNA_abund,bruv_abund, by = c("Site","Species"), all =TRUE) %>% 
+  as_tibble() %>% 
+  mutate(., mean_e_index = replace_na(mean_e_index, 0),
+         mean_bruv_MaxN = replace_na(mean_bruv_MaxN,0)) -> eDNA_bruv_comp
+
+eDNA_bruv_comp %>% 
+  mutate(., site_detection = case_when(mean_e_index > 0 & mean_bruv_MaxN > 0 ~"Site Detection",
+         TRUE ~"Other")) %>% 
+  group_by(Species) %>% 
+  dplyr::count(site_detection) %>% 
+  filter(., site_detection =="Site Detection") %>% 
+  filter(., n > 2) -> species_to_plot_bruv
+ 
+#Graph Multiplot
+   eDNA_bruv_comp %>%
+       filter(., Species %in% species_to_plot_bruv$Species) %>% 
+    dplyr::group_by(Species) %>% 
+    nest() %>% 
+    mutate(plot = map2(data,Species, ~ggplot(.x, aes(x= mean_bruv_MaxN , y = mean_e_index)) +   geom_smooth(method = "lm", col = c("#B57EDC"), fill = c("#B57EDC")) + stat_poly_eq(formula = my.formula,                                                                                                        aes(label = paste0("atop(", ..eq.label.., ",", ..rr.label.. , ")")),
+                                                                                                                                size = 2.5, label.x.npc = "right" ,rr.digits = 2,coef.digits = 2,p.digits=2, label.y.npc = 0.9,
+                                                                                                                                 parse = TRUE) +
+   stat_poly_eq(formula = my.formula,                                                                                                        aes(label = paste0(..p.value.label..)), size = 2.5, label.x.npc = 0.92 ,rr.digits = 2,coef.digits = 2,p.digits=2, label.y.npc = 0.74,
+                                                                                                                                 parse = TRUE) +
+                         
+                         
+                         geom_errorbar(aes(ymin = mean_e_index-sd_e_index,
+                                           ymax = mean_e_index+sd_e_index)) + 
+                         geom_errorbarh(aes(xmin = mean_bruv_MaxN-sd_bruv_MaxN,
+                                            xmax = mean_bruv_MaxN+sd_bruv_MaxN)) +
+                         theme_bw()+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),panel.background = element_blank()) +
+                         geom_point() + theme(plot.title = element_text(size = 14, face = 4),text = element_text(size=14)) +
+                         #geom_errorbarh(aes(xmin = xmin, xmax = xmax),height = .001)
+                         xlab("BRUV Counts") + ylab("eDNA Index") +
+                         ggtitle(as.character(.y))))-> bruv_plots
+  
+#Examine Plots
+multiplot(bruv_plots$plot[[1]], #R2=0.15, p=0.12 A. affiis !!
+            bruv_plots$plot[[2]],  #R2=0.05, p=0.393 C. stigmaeus !!!
+            bruv_plots$plot[[3]], #R2=0.078, p=0.261 G. nigricans
+            bruv_plots$plot[[4]],  #R2=0.015, p=0.632 M caliofrnica !
+            bruv_plots$plot[[5]], #R2=0.45, p=0.0023 P. clathratus
+            bruv_plots$plot[[6]], #R2=0.057, p=0.341 P. triseriata
+            bruv_plots$plot[[7]], #R2=0.41, p=0.0043 P. productus
+            bruv_plots$plot[[8]], #R2=0.05, p=0.357 surfperch
+            bruv_plots$plot[[9]], #R2=0.05, p=0.357
+            bruv_plots$plot[[10]], 
+          bruv_plots$plot[[11]], #R2=0.1, p=0.193,
+          cols = 5) #R2=0.94, p=0.001
+
+
+png( filename = here("Figures","S12_bruv_abundance.tiff"),
+       width=16,
+       height = 8,
+       res = 300,
+      units = c("in"))
+
+multiplot(bruv_plots$plot[[1]], #R2=0.15, p=0.12 A. affiis !!
+            bruv_plots$plot[[2]],  #R2=0.05, p=0.393 C. stigmaeus !!!
+            bruv_plots$plot[[3]], #R2=0.078, p=0.261 G. nigricans
+            bruv_plots$plot[[4]],  #R2=0.015, p=0.632 M caliofrnica !
+            bruv_plots$plot[[5]], #R2=0.45, p=0.0023 P. clathratus
+            bruv_plots$plot[[6]], #R2=0.057, p=0.341 P. triseriata
+            bruv_plots$plot[[7]], #R2=0.41, p=0.0043 P. productus
+            bruv_plots$plot[[8]], #R2=0.05, p=0.357 surfperch
+            bruv_plots$plot[[9]], #R2=0.05, p=0.357
+            bruv_plots$plot[[10]],
+           bruv_plots$plot[[11]], #R2=0.1, p=0.193
+            cols = 5) #R2=0.94, p=0.001
+dev.off()
+```
+
+
+####Create R^2 Value Table - Seine
+```{r}
+
+ssz.nested <- eDNA_seine_comp %>%
+  filter(., Species %in% species_to_plot_seine$Species) %>% 
+  dplyr::group_by(Species) %>% 
+  nest() 
+
+ssz.nested$data[[1]]
+
+ssz.fit_model <- function(df) lm(mean_e_index ~ mean_Seine_count, data = df)
+ssz.nested <- ssz.nested %>%
+  mutate(model = map(data, ssz.fit_model))
+
+ssz.nested$model[[1]]
+
+ssz.get_rsq <- function(mod) glance(mod)$r.squared
+
+ssz.nested <- ssz.nested %>%
+  mutate(r.squared = map_dbl(model, ssz.get_rsq))
+
+ssz.model_coef_nested <- ssz.nested %>% 
+  mutate(coef = map(model, ~tidy(.x)))
+
+  
+ssz.model_coef <- ssz.model_coef_nested %>%
+  unnest(coef)
+
+ssz.model_coef %>% 
+  dplyr::select(-data,-model) ->ssz.model_coef2print
+
+write.csv(ssz.model_coef2print, file=here("S12_sz.seine_model_stats.csv"))
+
+```
+####Create R^2 Value Table - BRUV
+```{r}
+bsz.nested <-  eDNA_bruv_comp %>%
+       filter(., Species %in% species_to_plot_bruv$Species) %>% 
+    dplyr::group_by(Species) %>% 
+    nest()
+
+bsz.nested
+bsz.nested$data[[1]]
+
+bsz.fit_model <- function(df) lm(mean_e_index ~ mean_bruv_MaxN, data = df)
+bsz.nested <- bsz.nested %>%
+  mutate(model = map(data, bsz.fit_model))
+
+bsz.nested
+bsz.nested$model[[1]]
+
+bsz.get_rsq <- function(mod) glance(mod)$r.squared
+
+bsz.nested <- bsz.nested %>%
+  mutate(r.squared = map_dbl(model, bsz.get_rsq))
+
+bsz.nested
+
+bsz.model_coef_nested <- bsz.nested %>% 
+  mutate(coef = map(model, ~tidy(.x)))
+
+  
+bsz.model_coef <- bsz.model_coef_nested %>%
+  unnest(coef)
+
+bsz.model_coef
+
+bsz.model_coef %>% 
+  dplyr::select(-data,-model) ->bsz.model_coef2print
+
+write.csv(bsz.model_coef2print, file=here("S13_sz.bruv_model_stats.csv"))
+
+```
+
+####Create R^2 Value Table - BRUV vs. Seine
+```{r}
+bsz.nested <-  seine_bruv_comp %>%
+       filter(., Species %in% species_to_plot_bruv_seine$Species) %>% 
+    dplyr::group_by(Species) %>% 
+    nest()
+
+bsz.nested
+bsz.nested$data[[1]]
+
+bsz.fit_model <- function(df) lm(mean_bruv_MaxN ~mean_Seine_count , data = df)
+bsz.nested <- bsz.nested %>%
+  mutate(model = map(data, bsz.fit_model))
+
+bsz.nested
+bsz.nested$model[[1]]
+
+bsz.get_rsq <- function(mod) glance(mod)$r.squared
+
+bsz.nested <- bsz.nested %>%
+  mutate(r.squared = map_dbl(model, bsz.get_rsq))
+
+bsz.nested
+
+bsz.model_coef_nested <- bsz.nested %>% 
+  mutate(coef = map(model, ~tidy(.x)))
+
+  
+bsz.model_coef <- bsz.model_coef_nested %>%
+  unnest(coef)
+
+bsz.model_coef
+
+bsz.model_coef %>% 
+  dplyr::select(-data,-model) ->bsz.model_coef2print
+
+write.csv(bsz.model_coef2print, file=here("S11_sz.bruv_seine_model_stats.csv"))
+
+```
+
+
+
+

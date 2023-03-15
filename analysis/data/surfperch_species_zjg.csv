@@ -1,0 +1,24 @@
+Scientific Name,Common Name,Clade,Species Level ID,Notes
+Phanerodon atripes,Sharpnose surfperch,1,yes,Zalembius rosaceus
+Phanerodon furcatus,White surfperch,1,no,
+Rhacochilus toxotes,Rubberlip surfperch,1,yes,
+Rhacochilus vacca,Pile perch,1,yes,
+Zalembius rosaceus,pink surfperch,1,no,Phanerodon furcatus
+Brachyistius frenatus,Kelp perch,2,yes,
+Amphistichus argenteus,Barred surfperch,3,no,family level ID because 2 genera represented have identical sequences
+Amphistichus koelzi,Calico surfperch,3,no,family level ID because 2 genera represented have identical sequences
+Amphistichus rhodoterus,Redtail surfperch,3,no,family level ID because 2 genera represented have identical sequences
+Hyperprosopon anale,Spotfin surfperch,3,no,family level ID because 2 genera represented have identical sequences
+Hyperprosopon argenteum,Walleye surfperch,3,no,family level ID because 2 genera represented have identical sequences
+Hyperprosopon ellipticum,Silver surfperch,3,no,family level ID because 2 genera represented have identical sequences
+Cymatogaster aggregata,Shiner perch,4,yes,
+Embiotoca jacksoni,black surfperch,5,yes,
+Hypsurus caryi,rainbow surfperch,5,yes,
+Embiotoca lateralis,striped surfperch,6,yes,
+Micrometrus aurora,Reef perch,7,yes,
+Micrometrus minimus,Dwarf perch,7,yes,
+Brachyistius aletes,,no barcode,,
+Ditrema jordani,,no barcode,,
+Ditrema temminckii,,no barcode,,
+Ditrema viride,,no barcode,,
+Neoditrema ransonnetii,,no barcode,,

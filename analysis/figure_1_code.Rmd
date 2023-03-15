@@ -1,0 +1,60 @@
+---
+title: "Figure 1"
+author: "Zack Gold"
+date: '2023-01-12'
+output: html_document
+---
+
+```{r, echo=FALSE, hide=TRUE, warnings=FALSE,message=FALSE}
+library(tidyverse)
+library(here)
+library(sf)
+library(ggsn)
+library(spData)
+library(rnaturalearth)
+world <- ne_countries(scale = "large", returnclass = "sf")
+here()
+```
+
+```{r,echo=FALSE, hide=TRUE, warnings=FALSE,echo=FALSE}
+sample_data <- read.csv(here("data","figure_1_lat_lon.csv"))
+sample_data
+```
+
+# Maps
+
+## Cruise Map
+
+```{r,echo=FALSE,warning=FALSE}
+  sample_data %>% 
+    dplyr::select(Site, Number,Latitude, Longitude, Nudge_x, Nudge_y) %>%  distinct() -> station_cruise
+  sf_use_s2(FALSE)
+  
+ggplot(data = world) +
+    geom_sf(fill = "antiquewhite1") +
+    coord_sf(xlim = c(-121, -118), ylim = c(33.2, 34.8), expand = FALSE) +
+  geom_point(data = station_cruise, aes(x = Longitude, y = Latitude), size = 2, color="navy")+
+    ggrepel::geom_text_repel(data = station_cruise, aes(x = Longitude, y = Latitude,label = Number),min.segment.length = 0,max.overlaps = Inf, size=6, color="navy",segment.size =0.5, force= 0.3, nudge_x = station_cruise$Nudge_x, nudge_y = station_cruise$Nudge_y, point.padding = NA) +
+  annotate("text", x = -120.6, y = 33.5, label = "PACIFIC OCEAN", size=8,fontface =2) +
+   annotate("text", x = -120.4, y = 34.13, label = "San Miguel Island", size=4,fontface ='italic') +
+   annotate("text", x = -120.1, y = 33.8, label = "Santa Rosa Island", size=4,fontface ='italic') +
+  annotate("text", x = -119.62, y = 34.11, label = "Santa Cruz Island", size=4,fontface ='italic') +
+  annotate("text", x = -118.24, y = 33.45, label = "Catalina Island", size=4,fontface ='italic') +
+   annotate("text", x = -118.5, y = 34.5, label = "CALIFORNIA", size=8, fontface =2) +theme_bw() +xlab("Longitude") +ylab("Lattitude")+
+  theme(panel.background = element_rect(fill = "aliceblue"),
+        axis.text = element_text(size = 11, colour = 1),
+        axis.title = element_text(size = 14, face = "bold"),
+        panel.grid = element_line(colour = NA))-> figure_1 
+
+```
+
+```{r}
+ggsave(here("Figures","Figure_1.tiff"),
+       plot=figure_1,
+       width=12,
+       height=12,
+       dpi=400,
+       units= "in"
+       )
+
+```
