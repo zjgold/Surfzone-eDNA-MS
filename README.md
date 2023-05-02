@@ -1,5 +1,4 @@
-# Surfzone-eDNA-MS
-A Comparison of Biomonitoring Methodologies for Surf Zone Fish Communities
+# A Comparison of Biomonitoring Methodologies for Surf Zone Fish Communities
 
 Zachary Gold1 ¶*, McKenzie Q. Koch1¶, Nicholas K. Schooler2, Kyle A. Emery2, Jenifer E. Dugan2, Robert J. Miller2, Henry M. Page2, Donna M. Schroeder3, David M. Hubbard2, Jessica R. Madden2, Stephen G. Whitaker2,4, and Paul H. Barber1
 
