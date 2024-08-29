@@ -15,7 +15,8 @@ Zachary Gold1 ¶*, McKenzie Q. Koch1¶, Nicholas K. Schooler2, Kyle A. Emery2, J
 Email: zjgold@ucla.edu 
 Phone: +1(310)-795-0020 
 
-¶ These authors contributed equally to this work.
+¶ These authors contributed equally to this work.  
+
 **Manuscript [PLoS ONE](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0260903)**
 
 ## Abstract
